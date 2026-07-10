@@ -1,0 +1,27 @@
+"""Placeholder fix, demonstrating the shape a real fix should take."""
+
+from __future__ import annotations
+
+from lmd_fixer.fixes import Fix, FixResult, LineChange, register
+from lmd_fixer.gcode import GCodeProgram
+
+
+@register
+class StripTrailingWhitespace(Fix):
+    id = "strip_trailing_whitespace"
+    label = "Strip trailing whitespace"
+    description = "Removes trailing spaces/tabs from every line."
+
+    def apply(self, program: GCodeProgram, **options) -> FixResult:
+        out = program.copy()
+        changes: list[LineChange] = []
+        for i, line in enumerate(out.lines):
+            stripped = line.rstrip(" \t")
+            if stripped != line:
+                changes.append(LineChange(kind="modified", original_index=i, original_text=line, new_text=stripped))
+            out.lines[i] = stripped
+        return FixResult(
+            program=out,
+            summary=f"Stripped trailing whitespace on {len(changes)} line(s).",
+            changes=changes,
+        )
