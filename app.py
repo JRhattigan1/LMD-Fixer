@@ -66,6 +66,16 @@ def render_side_by_side_diff(original_lines: list[str], final_lines: list[str]) 
     )
 
 
+def _sync_children_to_master(master_key: str, child_keys: list[str]) -> None:
+    """on_change callback for a master 'all' checkbox: pushes its value into
+    every per-change checkbox's session state (Streamlit ignores a keyed
+    widget's value= once the key exists in session state, so this is the
+    only way the master toggle can move already-rendered checkboxes)."""
+    value = st.session_state[master_key]
+    for key in child_keys:
+        st.session_state[key] = value
+
+
 st.set_page_config(page_title="LMD-Fixer", layout="wide")
 st.title("LMD-Fixer")
 st.caption("Upload laser metal deposition G-code, choose fixes, review each change, download the corrected file.")
@@ -106,6 +116,10 @@ if st.session_state.get("state_key") != state_key:
     st.session_state["current_program"] = original_program.copy()
     st.session_state["fix_index"] = 0
     st.session_state["applied_summaries"] = []
+    # Drop leftover per-change checkbox state from a previous file/selection,
+    # which would otherwise leak into this review wherever keys collide.
+    for key in [k for k in st.session_state if isinstance(k, str) and k.startswith("accept_")]:
+        del st.session_state[key]
 
 current_program: GCodeProgram = st.session_state["current_program"]
 fix_index: int = st.session_state["fix_index"]
@@ -139,7 +153,14 @@ if fix_index < len(selected_ids):
         st.write(result.summary)
 
         accept_key_prefix = f"accept_{fix_id}_{fix_index}"
-        remove_all = st.checkbox("Remove all sections", value=False, key=f"{accept_key_prefix}_all")
+        child_keys = [f"{accept_key_prefix}_{c.original_index}" for c in result.changes]
+        remove_all = st.checkbox(
+            "Remove all sections",
+            value=False,
+            key=f"{accept_key_prefix}_all",
+            on_change=_sync_children_to_master,
+            args=(f"{accept_key_prefix}_all", child_keys),
+        )
 
         accepted_indices = set()
         for change in result.changes:
@@ -180,25 +201,33 @@ if fix_index < len(selected_ids):
         st.divider()
 
         accept_key_prefix = f"accept_{fix_id}_{fix_index}"
-        select_all = st.checkbox("Accept all", value=True, key=f"{accept_key_prefix}_all")
+        child_keys = [f"{accept_key_prefix}_{c.original_index}" for c in result.changes]
+        select_all = st.checkbox(
+            "Accept all",
+            value=True,
+            key=f"{accept_key_prefix}_all",
+            on_change=_sync_children_to_master,
+            args=(f"{accept_key_prefix}_all", child_keys),
+        )
 
         accepted_indices = set()
         for change in result.changes:
             default = select_all
+            where = f" in {change.label}" if change.label else ""
             if change.kind == "removed":
                 reason = f" ({change.new_text})" if change.new_text else ""
                 caption = (
-                    f"Line {change.original_index + 1}: REMOVING `{change.original_text.strip()}`{reason} "
+                    f"Line {change.original_index + 1}{where}: REMOVING `{change.original_text.strip()}`{reason} "
                     "— uncheck to keep this line instead"
                 )
             elif change.kind == "modified":
                 caption = (
-                    f"Line {change.original_index + 1}: CHANGING `{change.original_text.strip()}` "
+                    f"Line {change.original_index + 1}{where}: CHANGING `{change.original_text.strip()}` "
                     f"->  `{(change.new_text or '').strip()}` — uncheck to leave unchanged"
                 )
             else:
                 caption = (
-                    f"Line {change.original_index + 1}: FLAGGING `{change.original_text.strip()}` "
+                    f"Line {change.original_index + 1}{where}: FLAGGING `{change.original_text.strip()}` "
                     "— uncheck to leave unflagged"
                 )
             checked = st.checkbox(caption, value=default, key=f"{accept_key_prefix}_{change.original_index}")
@@ -248,4 +277,6 @@ else:
         st.session_state["fix_index"] = 0
         st.session_state["applied_summaries"] = []
         st.session_state["current_program"] = original_program.copy()
+        for key in [k for k in st.session_state if isinstance(k, str) and k.startswith("accept_")]:
+            del st.session_state[key]
         st.rerun()

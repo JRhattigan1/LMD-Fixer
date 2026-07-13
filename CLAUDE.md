@@ -55,7 +55,15 @@ Run it with `streamlit run app.py`.
   whose correctness is genuinely uncertain, default to the safe (keep) side
   and give the UI its own rendering branch in `app.py` rather than reusing
   the generic accept-by-default checklist.
-- **G-code specifics learned from the real files** (`sample_data/`):
+- **Streamlit state gotchas already handled in `app.py`** — don't undo them:
+  a keyed checkbox ignores its `value=` once the key exists in session
+  state, so the "Accept all" / "Remove all sections" master checkboxes push
+  their value into every child checkbox key via an `on_change` callback
+  (`_sync_children_to_master`). All `accept_*` keys are deleted both on
+  state reset (new file / changed fix selection) and on "Start over" —
+  otherwise stale review choices leak into the next review wherever line
+  indices collide.
+- **G-code specifics learned from the real files** (`lmd_fixer/tests/`):
   - `G65 B0.0 F1000. D1 P8000` + following `M337`, and `G90 G0 A0.0`, are
     rotary-table commands unneeded when no rotary table is in use.
   - `M98 Pxxxx` calls a subprogram; consecutive calls with the same P value
@@ -63,7 +71,11 @@ Run it with `streamlit run app.py`.
     following `G4 X25.00` dwell are redundant too.
   - `G4 X25.00` after a *genuine* P-value change is a dwell whose necessity
     depends on machine/program specifics not recoverable from the file, so
-    it's always left to manual review, never auto-removed.
+    it's always left to manual review, never auto-removed. A dwell is
+    attributed to an `M98 Pxxxx` call only if the lines between them are
+    blank or `M325`; any other command breaks the association
+    (`flag_dwells._preceding_p_value`) and the dwell is labelled
+    "unknown P value" rather than misattributed.
   - Section markers are standalone comment lines like
     `(1_LAYER_STEPOVER_TEST_PATH_COPY_5)` — distinguished from free-text
     header comments (e.g. `(PROJECT: DIGF-CRAD-06736)`) by containing no
@@ -73,15 +85,20 @@ Run it with `streamlit run app.py`.
     CRLF (`GCodeProgram.to_text("\r\n")`) since that's what the machine
     controller expects, even though the UI displays with `\n` for
     readability.
-- `sample_data/` holds real example files (`O1140 - Original.ptp` is the
+- `lmd_fixer/tests/` holds real example files (`O1140 - Original.ptp` is the
   unedited original; `O1140.ptp` is the user's manually-fixed reference
   version) — useful for verifying a fix's output against a known-good
-  target, not just for eyeballing regex matches.
+  target, not just for eyeballing regex matches. Full-accept of the whole
+  pipeline reproduces the reference except for known review-choice
+  differences: the reference keeps all 45 `G90 G0 A0.0` lines and 3 of the
+  9 genuine-P-change dwells, and removes the `M325` alongside each dwell it
+  removes at a genuine P change (no fix covers that M325 case yet). Ignore
+  the `(PROGRAM CREATED ...)` timestamp header line when diffing.
 
 ## Testing changes
 
 There's no formal test suite yet. When changing or adding a fix, verify by
-running it against `sample_data/O1140 - Original.ptp` via a quick Python
+running it against `lmd_fixer/tests/O1140 - Original.ptp` via a quick Python
 snippet (see recent commits for the pattern: `run_fix` then
 `apply_accepted_changes` with `{c.original_index for c in result.changes}`
 for full-accept, or a subset to check partial-accept behaves correctly) and

@@ -11,22 +11,27 @@ from __future__ import annotations
 
 import re
 
-from lmd_fixer.fixes import Fix, FixResult, LineChange, register
+from lmd_fixer.fixes import Fix, FixResult, LineChange, register, section_names
 from lmd_fixer.gcode import GCodeProgram
 
 _DWELL_RE = re.compile(r"^/?\s*G4\s*X25\.0*\s*$", re.IGNORECASE)
 _M98_RE = re.compile(r"^/?\s*M98\s+P(\d+)", re.IGNORECASE)
+_M325_RE = re.compile(r"^/?\s*M325\s*$", re.IGNORECASE)
 
 
 def _preceding_p_value(lines: list[str], index: int) -> str | None:
     for j in range(index - 1, -1, -1):
-        match = _M98_RE.match(lines[j].strip())
+        stripped = lines[j].strip()
+        if not stripped or _M325_RE.match(stripped):
+            # Blank lines and the M325 between the M98 call and its dwell
+            # don't break the association; keep looking back.
+            continue
+        match = _M98_RE.match(stripped)
         if match:
             return match.group(1)
-        if lines[j].strip():
-            # Stop at the nearest non-blank line that isn't the M98 call
-            # so we don't attribute a dwell to a distant, unrelated P value.
-            continue
+        # Any other command means this dwell doesn't belong to an M98 call;
+        # don't attribute it to a distant, unrelated P value.
+        return None
     return None
 
 
@@ -40,6 +45,7 @@ class FlagDwells(Fix):
         out = program.copy()
         changes: list[LineChange] = []
         kept: list[str] = []
+        sections = section_names(out.lines)
         for i, line in enumerate(out.lines):
             if not _DWELL_RE.match(line.strip()):
                 kept.append(line)
@@ -52,6 +58,7 @@ class FlagDwells(Fix):
                     original_index=i,
                     original_text=line,
                     new_text=f"after M98 {p_desc}",
+                    label=sections[i],
                 )
             )
         out.lines = kept

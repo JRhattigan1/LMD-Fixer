@@ -7,6 +7,7 @@ defines a subclass of Fix and decorate it with @register.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Literal
@@ -14,6 +15,24 @@ from typing import Literal
 from lmd_fixer.gcode import GCodeProgram
 
 _REGISTRY: dict[str, type["Fix"]] = {}
+
+# Standalone comment line naming a program section, e.g. `(1_LAYER_...)` —
+# no whitespace inside the parens, distinguishing it from free-text header
+# comments like `(PROJECT: ...)`.
+SECTION_MARKER_RE = re.compile(r"^\(([^\s()]+)\)$")
+
+
+def section_names(lines: list[str]) -> list[str | None]:
+    """Maps each line index to the name of its enclosing (SECTION_NAME) block,
+    or None for lines before the first marker."""
+    names: list[str | None] = []
+    current: str | None = None
+    for line in lines:
+        match = SECTION_MARKER_RE.match(line.strip())
+        if match:
+            current = match.group(1)
+        names.append(current)
+    return names
 
 ChangeKind = Literal["removed", "modified", "flagged"]
 
@@ -69,7 +88,15 @@ def available_fixes() -> dict[str, type[Fix]]:
     return dict(_REGISTRY)
 
 
-__all__ = ["Fix", "FixResult", "LineChange", "register", "available_fixes"]
+__all__ = [
+    "Fix",
+    "FixResult",
+    "LineChange",
+    "register",
+    "available_fixes",
+    "section_names",
+    "SECTION_MARKER_RE",
+]
 
 # Import fix modules so their @register decorators run.
 from lmd_fixer.fixes import example_fix  # noqa: E402,F401

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-from lmd_fixer.fixes import Fix, FixResult, LineChange, register
+from lmd_fixer.fixes import Fix, FixResult, LineChange, register, section_names
 from lmd_fixer.gcode import GCodeProgram
 
 _M98_RE = re.compile(r"^/?\s*M98\s+P(\d+)\s*$", re.IGNORECASE)
@@ -35,6 +35,7 @@ class RemoveRepeatedPCalls(Fix):
         lines = out.lines
         changes: list[LineChange] = []
         remove_indices: set[int] = set()
+        sections = section_names(lines)
 
         last_p: str | None = None
         i = 0
@@ -59,6 +60,7 @@ class RemoveRepeatedPCalls(Fix):
                                 original_index=idx,
                                 original_text=lines[idx],
                                 new_text=f"repeated P{p_value}",
+                                label=sections[idx],
                             )
                         )
                     i = j

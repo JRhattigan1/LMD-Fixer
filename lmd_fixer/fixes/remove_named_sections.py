@@ -10,12 +10,8 @@ can toggle individual ones to keep.
 
 from __future__ import annotations
 
-import re
-
-from lmd_fixer.fixes import Fix, FixResult, LineChange, register
+from lmd_fixer.fixes import SECTION_MARKER_RE, Fix, FixResult, LineChange, register
 from lmd_fixer.gcode import GCodeProgram
-
-_SECTION_MARKER_RE = re.compile(r"^\(([^\s()]+)\)$")
 
 
 @register
@@ -30,7 +26,7 @@ class RemoveNamedSections(Fix):
 
         markers: list[tuple[int, str]] = []
         for i, line in enumerate(lines):
-            match = _SECTION_MARKER_RE.match(line.strip())
+            match = SECTION_MARKER_RE.match(line.strip())
             if match:
                 markers.append((i, match.group(1)))
 
