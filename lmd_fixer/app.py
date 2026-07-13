@@ -373,7 +373,6 @@ if st.session_state.get("state_key") != state_key:
     st.session_state["fix_index"] = 0
     st.session_state["applied_summaries"] = []
     st.session_state["history"] = []
-    st.session_state["celebrated"] = False
     # Drop leftover per-change checkbox state from a previous file/selection,
     # which would otherwise leak into this review wherever keys collide.
     _clear_review_widget_state()
@@ -546,9 +545,6 @@ if fix_index < len(selected_ids):
             if fix_index > 0 and st.button("← Back", use_container_width=True):
                 _go_back()
 else:
-    if not st.session_state.get("celebrated"):
-        st.session_state["celebrated"] = True
-        st.balloons()
     st.subheader("Review complete")
     render_stats(len(original_program.lines), len(current_program.lines))
 
@@ -571,7 +567,6 @@ else:
             st.session_state["applied_summaries"] = []
             st.session_state["current_program"] = original_program.copy()
             st.session_state["history"] = []
-            st.session_state["celebrated"] = False
             _clear_review_widget_state()
             st.rerun()
 
