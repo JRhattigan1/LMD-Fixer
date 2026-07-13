@@ -5,3 +5,4 @@ venv/
 build/
 *.egg-info/
 dist/
+lmd_fixer/tests/*.ptp
