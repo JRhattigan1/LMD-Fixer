@@ -62,7 +62,10 @@ Run it with `streamlit run app.py`.
   (`_sync_children_to_master`). All `accept_*` keys are deleted both on
   state reset (new file / changed fix selection) and on "Start over" —
   otherwise stale review choices leak into the next review wherever line
-  indices collide.
+  indices collide. `st.session_state["history"]` holds a stack of program
+  snapshots (one pushed per completed step) that powers the "Back to
+  previous fix" button; every code path that advances `fix_index` must push
+  onto it (use `_advance`, or mirror what the apply branches do).
 - **G-code specifics learned from the real files** (`lmd_fixer/tests/`):
   - `G65 B0.0 F1000. D1 P8000` + following `M337`, and `G90 G0 A0.0`, are
     rotary-table commands unneeded when no rotary table is in use.
