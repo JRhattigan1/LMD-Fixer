@@ -8,7 +8,7 @@ download the corrected program.
 ## Install and run (as a user)
 
 ```
-pip install git+https://<repo-url>/LMD-Fixer.git
+pip install git+https://github.com/JRhattigan1/LMD-Fixer/LMD-Fixer.git
 lmd-fixer
 ```
 
