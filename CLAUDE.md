@@ -28,7 +28,9 @@ data files are excluded from wheels).
   accept/reject rather than applying blindly.
   - `LineChange` refers to a line or line range (`original_index` to
     `end_index`, inclusive) in the *input* program to that fix, not the
-    original upload. `kind` is `"removed"`, `"modified"`, or `"flagged"`.
+    original upload. `kind` is `"removed"` or `"modified"`; an optional
+    `reason` string is shown in the review UI (don't overload `new_text`
+    for that — it's the replacement text for `"modified"` changes).
   - Fixes must NOT rely on line indices from a different fix's output — each
     fix is only ever handed the program as it exists after the prior fix's
     *accepted* changes were applied (see `pipeline.apply_accepted_changes`).
@@ -74,13 +76,15 @@ data files are excluded from wheels).
     rotary-table commands unneeded when no rotary table is in use.
   - `M98 Pxxxx` calls a subprogram; consecutive calls with the same P value
     are redundant (the program is already loaded) and their `M325` +
-    following `G4 X25.00` dwell are redundant too.
+    following `G4 X25.00` dwell are redundant too. The three lines are
+    always consecutive, so `remove_repeated_p_calls` proposes each group as
+    a single range `LineChange`, not three separate ones.
   - `G4 X25.00` after a *genuine* P-value change is a dwell whose necessity
     depends on machine/program specifics not recoverable from the file, so
     it's always left to manual review, never auto-removed. A dwell is
     attributed to an `M98 Pxxxx` call only if the lines between them are
     blank or `M325`; any other command breaks the association
-    (`flag_dwells._preceding_p_value`) and the dwell is labelled
+    (`remove_dwells._preceding_p_value`) and the dwell is labelled
     "unknown P value" rather than misattributed.
   - Section markers are standalone comment lines like
     `(1_LAYER_STEPOVER_TEST_PATH_COPY_5)` — distinguished from free-text

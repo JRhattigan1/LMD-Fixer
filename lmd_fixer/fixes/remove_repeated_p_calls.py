@@ -28,7 +28,7 @@ _DWELL_RE = re.compile(r"^/?\s*G4\s*X25\.0*\s*$", re.IGNORECASE)
 class RemoveRepeatedPCalls(Fix):
     id = "remove_repeated_p_calls"
     label = "Remove repeated M98/M325 program calls"
-    description = "Removes M98 Pxxxx + M325 (+ following G4 X25.00 dwell) when the P value is the same as the previous M98 call. Kept if the P value actually changes."
+    description = "Removes M98 Pxxxx + M325 (+ following G4 X25.00 dwell) when the P value is the same as the previous M98 call. Each group is reviewed as one change. Kept if the P value actually changes."
 
     def apply(self, program: GCodeProgram, **options) -> FixResult:
         out = program.copy()
@@ -44,25 +44,24 @@ class RemoveRepeatedPCalls(Fix):
             if match:
                 p_value = match.group(1)
                 if p_value == last_p:
-                    group = [i]
+                    # The M98, its M325, and the dwell are always consecutive,
+                    # so the group is proposed as a single reviewable change.
                     j = i + 1
                     if j < len(lines) and _M325_RE.match(lines[j].strip()):
-                        group.append(j)
                         j += 1
                     if j < len(lines) and _DWELL_RE.match(lines[j].strip()):
-                        group.append(j)
                         j += 1
-                    for idx in group:
-                        remove_indices.add(idx)
-                        changes.append(
-                            LineChange(
-                                kind="removed",
-                                original_index=idx,
-                                original_text=lines[idx],
-                                new_text=f"repeated P{p_value}",
-                                label=sections[idx],
-                            )
+                    remove_indices.update(range(i, j))
+                    changes.append(
+                        LineChange(
+                            kind="removed",
+                            original_index=i,
+                            end_index=j - 1,
+                            original_text=lines[i],
+                            reason=f"repeated P{p_value}",
+                            label=sections[i],
                         )
+                    )
                     i = j
                     continue
                 last_p = p_value
@@ -71,6 +70,9 @@ class RemoveRepeatedPCalls(Fix):
         out.lines = [line for idx, line in enumerate(lines) if idx not in remove_indices]
         return FixResult(
             program=out,
-            summary=f"Removed {len(changes)} line(s) from repeated M98 P-value calls.",
+            summary=(
+                f"Removed {len(changes)} repeated M98 program-call group(s) "
+                f"({len(remove_indices)} lines)."
+            ),
             changes=changes,
         )

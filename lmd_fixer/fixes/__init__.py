@@ -34,7 +34,7 @@ def section_names(lines: list[str]) -> list[str | None]:
         names.append(current)
     return names
 
-ChangeKind = Literal["removed", "modified", "flagged"]
+ChangeKind = Literal["removed", "modified"]
 
 
 @dataclass
@@ -49,9 +49,10 @@ class LineChange:
     kind: ChangeKind
     original_index: int
     original_text: str
-    new_text: str | None = None  # None when kind == "removed"
+    new_text: str | None = None  # replacement text for kind == "modified"; unused for "removed"
     end_index: int | None = None  # None means single-line; defaults to original_index
     label: str | None = None  # optional human-readable name for the change (e.g. section name)
+    reason: str | None = None  # optional short explanation shown in the review UI
 
     def __post_init__(self) -> None:
         if self.end_index is None:
@@ -100,7 +101,7 @@ __all__ = [
 
 # Import fix modules so their @register decorators run.
 from lmd_fixer.fixes import example_fix  # noqa: E402,F401
-from lmd_fixer.fixes import flag_dwells  # noqa: E402,F401
+from lmd_fixer.fixes import remove_dwells  # noqa: E402,F401
 from lmd_fixer.fixes import remove_named_sections  # noqa: E402,F401
 from lmd_fixer.fixes import remove_repeated_p_calls  # noqa: E402,F401
 from lmd_fixer.fixes import remove_rotary_table  # noqa: E402,F401

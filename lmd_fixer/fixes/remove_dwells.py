@@ -36,8 +36,8 @@ def _preceding_p_value(lines: list[str], index: int) -> str | None:
 
 
 @register
-class FlagDwells(Fix):
-    id = "flag_dwells"
+class RemoveDwells(Fix):
+    id = "remove_dwells"
     label = "Remove G4 X25.00 dwells (review each)"
     description = "Removes G4 X25.00 dwell lines following an M98 Pxxxx subprogram call. Each is listed with its preceding P value so you can choose to keep it instead of removing it."
 
@@ -57,7 +57,7 @@ class FlagDwells(Fix):
                     kind="removed",
                     original_index=i,
                     original_text=line,
-                    new_text=f"after M98 {p_desc}",
+                    reason=f"after M98 {p_desc}",
                     label=sections[i],
                 )
             )

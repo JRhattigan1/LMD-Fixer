@@ -59,9 +59,9 @@ Fixes always run in this order, independent of sidebar tick order:
 3. **Remove repeated M98/M325 program calls** (`remove_repeated_p_calls`) —
    an `M98 Pxxxx` call that repeats the same P value as the previous call is
    a no-op, so that call, its `M325` line, and the following `G4 X25.00`
-   dwell (if present) are removed automatically. If the P value actually
-   changes, the pair is left in place.
-4. **Remove G4 X25.00 dwells** (`flag_dwells`) — the dwells that remain
+   dwell (if present) are removed automatically, reviewed as one group per
+   call. If the P value actually changes, the pair is left in place.
+4. **Remove G4 X25.00 dwells** (`remove_dwells`) — the dwells that remain
    after step 3 follow a genuine P-value change, so their necessity can't be
    determined from the file alone. Each is proposed for removal along with
    the P value it follows, and you decide per occurrence whether to keep it.
@@ -84,7 +84,7 @@ lmd_fixer/
     remove_rotary_table.py
     remove_named_sections.py
     remove_repeated_p_calls.py
-    flag_dwells.py
+    remove_dwells.py
     example_fix.py              placeholder fix (strip trailing whitespace)
   tests/                        real example .ptp files:
                                 "O1140 - Original.ptp" (unedited) and

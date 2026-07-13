@@ -24,20 +24,32 @@ from lmd_fixer.pipeline import apply_accepted_changes, run_fix
 
 # Only render per-change context previews when the list is small enough for
 # them to be useful rather than overwhelming (and cheap enough to render).
-MAX_CHANGES_WITH_CONTEXT = 30
+MAX_CHANGES_WITH_CONTEXT = 40
 
 
-def render_side_by_side_diff(original_lines: list[str], final_lines: list[str]) -> str:
+def render_side_by_side_diff(
+    original_lines: list[str], final_lines: list[str], n_context: int = 3
+) -> str:
     """Builds an HTML two-column diff: original on the left, final on the right,
     with removed lines highlighted red on the left and added/changed lines
-    highlighted green on the right. Unchanged lines are shown plainly on both sides.
+    highlighted green on the right. Long runs of unchanged lines are collapsed
+    to `n_context` lines either side of each change, with a marker row showing
+    how many lines were hidden.
     """
     matcher = difflib.SequenceMatcher(a=original_lines, b=final_lines, autojunk=False)
     rows = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            for oi, fi in zip(range(i1, i2), range(j1, j2)):
-                rows.append((original_lines[oi], final_lines[fi], "equal"))
+            n = i2 - i1
+            if n > 2 * n_context + 1:
+                for k in range(n_context):
+                    rows.append((original_lines[i1 + k], final_lines[j1 + k], "equal"))
+                rows.append((f"{n - 2 * n_context} unchanged lines hidden", "", "gap"))
+                for k in range(n - n_context, n):
+                    rows.append((original_lines[i1 + k], final_lines[j1 + k], "equal"))
+            else:
+                for oi, fi in zip(range(i1, i2), range(j1, j2)):
+                    rows.append((original_lines[oi], final_lines[fi], "equal"))
         elif tag == "delete":
             for oi in range(i1, i2):
                 rows.append((original_lines[oi], "", "delete"))
@@ -61,6 +73,13 @@ def render_side_by_side_diff(original_lines: list[str], final_lines: list[str]) 
 
     html_rows = []
     for otext, ftext, tag in rows:
+        if tag == "gap":
+            html_rows.append(
+                '<tr><td colspan="2" style="background:#2a2a2a; color:#888; '
+                'text-align:center; padding:2px 6px; font-style:italic;">'
+                f"&#8943; {html.escape(otext)} &#8943;</td></tr>"
+            )
+            continue
         left_bg, right_bg = row_colors[tag]
         html_rows.append(
             "<tr>"
@@ -137,7 +156,7 @@ fixes = available_fixes()
 # Fixed run order: rotary table cleanup, then optional named-section removal,
 # then repeated M98/M325 program calls are collapsed, and only then are the
 # surviving G4 X25.00 dwells (genuine P-value changes) put up for manual review.
-FIX_ORDER = ["remove_rotary_table", "remove_named_sections", "remove_repeated_p_calls", "flag_dwells"]
+FIX_ORDER = ["remove_rotary_table", "remove_named_sections", "remove_repeated_p_calls", "remove_dwells"]
 ordered_fix_ids = [fid for fid in FIX_ORDER if fid in fixes]
 ordered_fix_ids += [fid for fid in fixes if fid not in ordered_fix_ids]
 
@@ -290,27 +309,27 @@ if fix_index < len(selected_ids):
             for change in result.changes:
                 default = select_all
                 where = f" in {change.label}" if change.label else ""
+                end = change.end_index if change.end_index is not None else change.original_index
+                n_lines = end - change.original_index + 1
+                if n_lines > 1:
+                    loc = f"Lines {change.original_index + 1}-{end + 1}{where}"
+                    what = f"`{change.original_text.strip()}` + {n_lines - 1} following line(s)"
+                else:
+                    loc = f"Line {change.original_index + 1}{where}"
+                    what = f"`{change.original_text.strip()}`"
                 if change.kind == "removed":
-                    reason = f" ({change.new_text})" if change.new_text else ""
-                    caption = (
-                        f"Line {change.original_index + 1}{where}: REMOVING `{change.original_text.strip()}`{reason} "
-                        "— uncheck to keep this line instead"
-                    )
-                elif change.kind == "modified":
-                    caption = (
-                        f"Line {change.original_index + 1}{where}: CHANGING `{change.original_text.strip()}` "
-                        f"->  `{(change.new_text or '').strip()}` — uncheck to leave unchanged"
-                    )
+                    reason = f" ({change.reason})" if change.reason else ""
+                    keep_word = "these lines" if n_lines > 1 else "this line"
+                    caption = f"{loc}: REMOVING {what}{reason} — uncheck to keep {keep_word} instead"
                 else:
                     caption = (
-                        f"Line {change.original_index + 1}{where}: FLAGGING `{change.original_text.strip()}` "
-                        "— uncheck to leave unflagged"
+                        f"{loc}: CHANGING {what} "
+                        f"->  `{(change.new_text or '').strip()}` — uncheck to leave unchanged"
                     )
                 checked = st.checkbox(caption, value=default, key=f"{accept_key_prefix}_{change.original_index}")
                 if checked:
                     accepted_indices.add(change.original_index)
                 if show_context:
-                    end = change.end_index if change.end_index is not None else change.original_index
                     with st.expander("Show surrounding lines", expanded=False):
                         st.code(
                             render_change_context(current_program.lines, change.original_index, end),
@@ -360,7 +379,10 @@ else:
             st.write(f"- {s}")
 
     st.subheader("Final review: original vs. fixed")
-    st.caption("Red = removed from the original. Green = added/changed in the final version.")
+    st.caption(
+        "Red = removed from the original. Green = added/changed in the final version. "
+        "Long unchanged runs are collapsed."
+    )
     st.markdown(
         render_side_by_side_diff(original_program.lines, current_program.lines),
         unsafe_allow_html=True,
