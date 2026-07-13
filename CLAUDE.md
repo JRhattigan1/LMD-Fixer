@@ -11,7 +11,10 @@ this tool automates that with a reviewable, step-by-step UI rather than a
 one-shot batch transform, because whether a given line is safe to remove is
 often context-dependent and the user wants a chance to check each one.
 
-Run it with `streamlit run app.py`.
+Run it with `streamlit run lmd_fixer/app.py` from a checkout, or via the
+`lmd-fixer` console command once pip-installed (entry point in
+`lmd_fixer/cli.py`, packaging in `pyproject.toml`; the `lmd_fixer.tests`
+data files are excluded from wheels).
 
 ## Architecture
 
@@ -33,7 +36,7 @@ Run it with `streamlit run app.py`.
   (rebuilds a program keeping only the changes the user accepted, handling
   both single lines and ranges), and `run_pipeline` (applies every fix
   unconditionally with no review — kept for scripting, not used by the UI).
-- `app.py` — Streamlit UI. Runs fixes one at a time in a fixed pipeline
+- `lmd_fixer/app.py` — Streamlit UI. Runs fixes one at a time in a fixed pipeline
   order (`FIX_ORDER`), independent of sidebar tick order. Holds
   `original_program` and `current_program` in `st.session_state` so the
   final screen can render a side-by-side diff of the untouched upload

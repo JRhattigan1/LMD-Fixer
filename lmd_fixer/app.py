@@ -1,12 +1,20 @@
 """Streamlit web UI for LMD-Fixer.
 
-Run with: streamlit run app.py
+Run with `lmd-fixer` (installed entry point) or
+`streamlit run lmd_fixer/app.py` from a checkout.
 """
 
 from __future__ import annotations
 
 import difflib
 import html
+import sys
+from pathlib import Path
+
+# `streamlit run` executes this file as a plain script, so when running from
+# a checkout (not an installed package) make the repo root importable.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 

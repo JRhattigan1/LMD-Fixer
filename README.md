@@ -5,19 +5,32 @@ programs before they're run on the machine. Upload a file, walk through a
 fixed sequence of fixes, review and accept/reject each proposed change, and
 download the corrected program.
 
-## Setup
+## Install and run (as a user)
 
 ```
-pip install -r requirements.txt
-```
-
-## Running
-
-```
-streamlit run app.py
+pip install git+https://<repo-url>/LMD-Fixer.git
+lmd-fixer
 ```
 
 This opens the UI in your browser (defaults to http://localhost:8501).
+Extra arguments are passed through to `streamlit run`, e.g.
+`lmd-fixer --server.port 8600`.
+
+With [uv](https://docs.astral.sh/uv/) instead of pip:
+
+```
+uv tool install git+https://<repo-url>/LMD-Fixer.git
+lmd-fixer
+```
+
+(and later `uv tool upgrade lmd-fixer` to pick up updates).
+
+## Running from a checkout (development)
+
+```
+pip install -r requirements.txt
+streamlit run lmd_fixer/app.py
+```
 
 ## How it works
 
@@ -60,8 +73,10 @@ fixes above if selected.
 ## Project layout
 
 ```
-app.py                          Streamlit UI
+pyproject.toml                  packaging config; `lmd-fixer` entry point
 lmd_fixer/
+  app.py                        Streamlit UI
+  cli.py                        `lmd-fixer` console command (wraps streamlit run)
   gcode.py                      GCodeProgram: load/save, line-based model
   pipeline.py                   run_fix / apply_accepted_changes
   fixes/
