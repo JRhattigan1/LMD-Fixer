@@ -1,12 +1,16 @@
-"""Placeholder fix, demonstrating the shape a real fix should take."""
+"""Template demonstrating the shape a real fix should take.
+
+Not registered (and not imported by the package), so it does not appear in
+the UI. To activate a fix like this one: decorate it with @register and
+import its module in lmd_fixer/fixes/__init__.py.
+"""
 
 from __future__ import annotations
 
-from lmd_fixer.fixes import Fix, FixResult, LineChange, register
+from lmd_fixer.fixes import Fix, FixResult, LineChange, register  # noqa: F401
 from lmd_fixer.gcode import GCodeProgram
 
 
-@register
 class StripTrailingWhitespace(Fix):
     id = "strip_trailing_whitespace"
     label = "Strip trailing whitespace"

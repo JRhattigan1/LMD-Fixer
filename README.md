@@ -66,9 +66,6 @@ Fixes always run in this order, independent of sidebar tick order:
    determined from the file alone. Each is proposed for removal along with
    the P value it follows, and you decide per occurrence whether to keep it.
 
-A **Strip trailing whitespace** fix (`strip_trailing_whitespace`) is also
-available in the sidebar; it has no ordering dependency and runs after the
-fixes above if selected.
 
 ## Project layout
 
@@ -85,7 +82,7 @@ lmd_fixer/
     remove_named_sections.py
     remove_repeated_p_calls.py
     remove_dwells.py
-    example_fix.py              placeholder fix (strip trailing whitespace)
+    example_fix.py              unregistered template for writing new fixes
   tests/                        real example .ptp files:
                                 "O1140 - Original.ptp" (unedited) and
                                 "O1140.ptp" (manually-fixed reference)

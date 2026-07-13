@@ -39,6 +39,24 @@ def inject_css() -> None:
         /* tighten the top of the page */
         .block-container {{ padding-top: 2.2rem; }}
 
+        /* ---- animations ---- */
+        @keyframes lmdFadeUp {{
+            from {{ opacity: 0; transform: translateY(8px); }}
+            to   {{ opacity: 1; transform: translateY(0); }}
+        }}
+        @keyframes lmdGlow {{
+            0%, 100% {{ box-shadow: 0 0 0 0 rgba(0,216,108,0.35); }}
+            50%      {{ box-shadow: 0 0 10px 2px rgba(0,216,108,0.25); }}
+        }}
+        .lmd-hero, .lmd-steps, .lmd-stats {{ animation: lmdFadeUp 0.45s ease both; }}
+        .lmd-stat:nth-child(1) {{ animation: lmdFadeUp 0.45s ease 0.00s both; }}
+        .lmd-stat:nth-child(2) {{ animation: lmdFadeUp 0.45s ease 0.08s both; }}
+        .lmd-stat:nth-child(3) {{ animation: lmdFadeUp 0.45s ease 0.16s both; }}
+        @media (prefers-reduced-motion: reduce) {{
+            .lmd-hero, .lmd-steps, .lmd-stats, .lmd-stat {{ animation: none; }}
+            .lmd-step.active {{ animation: none; }}
+        }}
+
         /* app title */
         .lmd-hero h1 {{
             font-size: 2.1rem;
@@ -60,7 +78,9 @@ def inject_css() -> None:
             font-size: 0.82rem; font-weight: 500;
             border: 1px solid rgba(255,255,255,0.10);
             color: {DIM}; background: rgba(255,255,255,0.03);
+            transition: color 0.25s ease, background 0.25s ease, border-color 0.25s ease;
         }}
+        .lmd-step.active {{ animation: lmdGlow 2.4s ease-in-out infinite; }}
         .lmd-step.done {{
             color: {ACCENT}; border-color: rgba(45,212,191,0.35);
             background: rgba(45,212,191,0.08);
@@ -85,19 +105,49 @@ def inject_css() -> None:
         div[data-testid="stCheckbox"] {{ margin-bottom: 0.15rem; }}
 
         /* full-width primary buttons feel more app-like */
-        div[data-testid="stButton"] > button {{ border-radius: 10px; }}
-        div[data-testid="stDownloadButton"] > button {{ border-radius: 10px; }}
+        div[data-testid="stButton"] > button,
+        div[data-testid="stDownloadButton"] > button {{
+            border-radius: 10px;
+            transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+        }}
+        div[data-testid="stButton"] > button:hover,
+        div[data-testid="stDownloadButton"] > button:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+        }}
+        div[data-testid="stButton"] > button:active,
+        div[data-testid="stDownloadButton"] > button:active {{
+            transform: translateY(0);
+        }}
 
         /* file uploader card */
         section[data-testid="stFileUploaderDropzone"] {{
             border-radius: 14px;
             border: 1.5px dashed rgba(45,212,191,0.45);
             background: rgba(45,212,191,0.04);
+            transition: border-color 0.2s ease, background 0.2s ease;
+        }}
+        section[data-testid="stFileUploaderDropzone"]:hover {{
+            border-color: rgba(45,212,191,0.85);
+            background: rgba(45,212,191,0.08);
         }}
 
         /* expanders as subtle cards */
         details[data-testid="stExpander"] {{
             border-radius: 10px; border: {CARD_BORDER};
+            transition: border-color 0.2s ease;
+        }}
+        details[data-testid="stExpander"]:hover {{
+            border-color: rgba(255,255,255,0.22);
+        }}
+
+        /* checkbox rows highlight on hover so long lists are easier to track */
+        div[data-testid="stCheckbox"] {{
+            border-radius: 8px;
+            transition: background 0.15s ease;
+        }}
+        div[data-testid="stCheckbox"]:hover {{
+            background: rgba(255,255,255,0.04);
         }}
         </style>
         """,
@@ -323,6 +373,7 @@ if st.session_state.get("state_key") != state_key:
     st.session_state["fix_index"] = 0
     st.session_state["applied_summaries"] = []
     st.session_state["history"] = []
+    st.session_state["celebrated"] = False
     # Drop leftover per-change checkbox state from a previous file/selection,
     # which would otherwise leak into this review wherever keys collide.
     _clear_review_widget_state()
@@ -495,6 +546,9 @@ if fix_index < len(selected_ids):
             if fix_index > 0 and st.button("← Back", use_container_width=True):
                 _go_back()
 else:
+    if not st.session_state.get("celebrated"):
+        st.session_state["celebrated"] = True
+        st.balloons()
     st.subheader("Review complete")
     render_stats(len(original_program.lines), len(current_program.lines))
 
@@ -517,6 +571,7 @@ else:
             st.session_state["applied_summaries"] = []
             st.session_state["current_program"] = original_program.copy()
             st.session_state["history"] = []
+            st.session_state["celebrated"] = False
             _clear_review_widget_state()
             st.rerun()
 
