@@ -98,7 +98,9 @@ data files are excluded from wheels).
 - `lmd_fixer/tests/` holds real example files (`O1140 - Original.ptp` is the
   unedited original; `O1140.ptp` is the user's manually-fixed reference
   version) — useful for verifying a fix's output against a known-good
-  target, not just for eyeballing regex matches. Full-accept of the whole
+  target, not just for eyeballing regex matches. These `.ptp` files are
+  git-ignored (proprietary project data, kept out of the public repo), so
+  they exist only on the user's machine — a fresh clone won't have them. Full-accept of the whole
   pipeline reproduces the reference except for known review-choice
   differences: the reference keeps all 45 `G90 G0 A0.0` lines and 3 of the
   9 genuine-P-change dwells, and removes the `M325` alongside each dwell it
