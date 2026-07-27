@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 import html
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +26,29 @@ from lmd_fixer.pipeline import apply_accepted_changes, run_fix
 # Only render per-change context previews when the list is small enough for
 # them to be useful rather than overwhelming (and cheap enough to render).
 MAX_CHANGES_WITH_CONTEXT = 40
+
+# Standalone program-number header line, e.g. `O1140` (optionally `/`-blocked
+# like other lines). The machine expects this to match the program's filename.
+O_NUMBER_LINE_RE = re.compile(r"^(/?\s*O)(\d+)\s*$")
+O_NUMBER_IN_NAME_RE = re.compile(r"O(\d+)", re.IGNORECASE)
+
+
+def sync_o_number(program: GCodeProgram, output_name: str) -> GCodeProgram:
+    """Rewrites the program's `Oxxxx` header line to match the O-number found
+    in `output_name`, if both are present. Returns the program unchanged
+    otherwise (no O-number line, or no O#### in the chosen filename)."""
+    name_match = O_NUMBER_IN_NAME_RE.search(output_name)
+    if not name_match:
+        return program
+    new_number = name_match.group(1)
+    for i, line in enumerate(program.lines):
+        line_match = O_NUMBER_LINE_RE.match(line.strip())
+        if line_match:
+            out = program.copy()
+            out.lines[i] = f"{line_match.group(1)}{new_number}"
+            return out
+    return program
+
 
 ACCENT = "#2dd4bf"
 DIM = "#8b93a3"
@@ -548,12 +572,48 @@ else:
     st.subheader("Review complete")
     render_stats(len(original_program.lines), len(current_program.lines))
 
+    default_name = st.session_state.get("output_name_default")
+    if default_name != uploaded.name or "output_name" not in st.session_state:
+        st.session_state["output_name"] = f"fixed_{uploaded.name}"
+        st.session_state["output_name_default"] = uploaded.name
+    with st.form("output_name_form", border=False):
+        st.text_input("Output file name", key="output_name")
+        st.form_submit_button("Update file name")
+    output_name = st.session_state["output_name"]
+    fallback_name = f"fixed_{uploaded.name}"
+    if not output_name.strip():
+        st.warning(f"Output file name is empty — falling back to '{fallback_name}'.")
+    final_name = output_name.strip() or fallback_name
+
+    upload_suffix = Path(uploaded.name).suffix.lower()
+    final_suffix = Path(final_name).suffix.lower()
+    if upload_suffix and not final_suffix:
+        final_name += upload_suffix
+        st.caption(f"No file extension given — appended '{upload_suffix}' to match the uploaded file.")
+    elif upload_suffix and final_suffix != upload_suffix:
+        st.warning(
+            f"File extension changed from '{upload_suffix}' to '{final_suffix}' — "
+            "the machine controller may expect the original extension."
+        )
+
+    download_program = sync_o_number(current_program, final_name)
+    name_matches = O_NUMBER_IN_NAME_RE.findall(final_name)
+    if len(name_matches) > 1:
+        st.warning(
+            f"Multiple O-numbers found in the file name ({', '.join('O' + n for n in name_matches)}) — "
+            f"using the first one, O{name_matches[0]}."
+        )
+    if name_matches and download_program.lines != current_program.lines:
+        st.caption(f"Program number updated to O{name_matches[0]} to match the file name.")
+    elif name_matches:
+        st.caption("No O-number header line found in this program — file name left as the only reference.")
+
     col_dl, col_back, col_restart, _ = st.columns([2, 1, 1, 1])
     with col_dl:
         st.download_button(
             "⬇ Download fixed file",
-            data=current_program.to_text("\r\n"),
-            file_name=f"fixed_{uploaded.name}",
+            data=download_program.to_text("\r\n"),
+            file_name=final_name,
             mime="text/plain",
             type="primary",
             use_container_width=True,
