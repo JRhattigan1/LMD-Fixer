@@ -101,6 +101,7 @@ __all__ = [
 
 # Import fix modules so their @register decorators run.
 # (example_fix is an unregistered template and deliberately not imported.)
+from lmd_fixer.fixes import adjust_section_feeds  # noqa: E402,F401
 from lmd_fixer.fixes import remove_dwells  # noqa: E402,F401
 from lmd_fixer.fixes import remove_named_sections  # noqa: E402,F401
 from lmd_fixer.fixes import remove_repeated_p_calls  # noqa: E402,F401

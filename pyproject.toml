@@ -9,7 +9,7 @@ description = "Reviewable clean-up of laser metal deposition (LMD) G-code/PTP pr
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "streamlit>=1.30",
+    "streamlit>=1.36",
 ]
 
 [project.scripts]

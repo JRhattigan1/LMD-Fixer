@@ -1,1 +1,1 @@
-streamlit>=1.30  # developed and tested against 1.58
+streamlit>=1.36  # developed and tested against 1.58
