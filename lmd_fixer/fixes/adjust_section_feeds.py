@@ -30,13 +30,31 @@ original feed at the start of the next section/toolpath when needed.
 other non-motion G codes (G4 dwell X is a time, G28 axis words are an
 intermediate point).
 
+A section can instead be given a *ramp*: a start feed and an end feed, with
+every move in between fed at the linearly interpolated value for its own
+position along the section. Two things make that work on real files. Feeds are
+snapped to `RAMP_FEED_STEP`, so a run of moves that rounds to the same value
+writes one F word rather than dozens of near-identical ones. And long moves are
+cut into chords of about `chord_mm`, because the CAM emits curves as ~0.5 mm
+chords but straights as one or two very long moves — without splitting, a ramp
+across a 26 mm straight could only step once. Only plain XY G1 moves are split;
+a Z plunge, a rotary move or a real G2/G3 arc is left whole.
+
 Options (all optional; with none, no changes are proposed):
     sections: {toolpath_start_index: int}          N equal sections (default 1)
     splits:   {toolpath_start_index: list[float]}  split distances in mm;
                                                    overrides `sections` when set
     geometry: {toolpath_start_index} or            split into straight/arc
               {toolpath_start_index: bool}         runs; overrides both above
+    layers:   {toolpath_start_index} or            also cut at every layer
+              {toolpath_start_index: bool}         boundary; composes with the
+                                                   division above rather than
+                                                   replacing it
     feeds:    {(toolpath_start_index, section_no): float}  1-based section number
+    ramps:    {(toolpath_start_index, section_no): (start_feed, end_feed)}
+                                                   overrides `feeds` for that section
+    chord_mm: float   length to cut long moves to when ramping (DEFAULT_CHORD_MM)
+    feed_step: float  rounding step for ramped feeds (RAMP_FEED_STEP)
 """
 
 from __future__ import annotations
@@ -70,6 +88,9 @@ class _Move:
     start_xy: tuple[float, float] | None = None
     end_xy: tuple[float, float] | None = None
     curved: bool = False  # a real G2/G3 arc, as opposed to a G1 line
+    # Z the move ends at — the deposition plane for a laser-on move, and what
+    # layers are recovered from. None where Z isn't tracked.
+    z: float | None = None
 
 
 @dataclass
@@ -92,6 +113,8 @@ class ToolpathSection:
     to_mm: float
     original_feeds: list[float]
     kind: str = ""  # "line"/"arc" when split by geometry, else ""
+    layer: int = 0  # 1-based layer this section sits in; 0 when not split by layer
+    layer_z: float | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -109,6 +132,11 @@ class Toolpath:
     sections: list[ToolpathSection] = field(default_factory=list)
     # XY footprint, None for a toolpath whose position isn't trackable.
     bounds: tuple[float, float, float, float] | None = None  # x0, x1, y0, y1
+    # Layers found in this toolpath's measured path, counted whether or not
+    # the toolpath is actually being divided by them — the UI offers the split
+    # only where there is more than one.
+    n_layers: int = 1
+    layer_zs: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -274,7 +302,7 @@ def _parse_cached(lines: tuple[str, ...]) -> _Parsed:
             length = math.hypot(planar, dz)
         start_xy = (start["X"], start["Y"]) if start["X"] is not None and start["Y"] is not None else None
         end_xy = (pos["X"], pos["Y"]) if pos["X"] is not None and pos["Y"] is not None else None
-        parsed.moves.append(_Move(i, length, laser_on, start_xy, end_xy, motion in (2, 3)))
+        parsed.moves.append(_Move(i, length, laser_on, start_xy, end_xy, motion in (2, 3), pos["Z"]))
 
     return parsed
 
@@ -294,10 +322,31 @@ def _toolpath_bounds(lines: list[str]) -> list[tuple[int, int, str]]:
 # into a neighbour so a stray vertex doesn't become its own section.
 ARC_RADIUS_MM = 10.0
 MIN_SEGMENT_MM = 1.0
+# A junction turning by more than this, between moves long enough to be real
+# straight stretches, is a corner — whatever the radius test makes of it.
+#
+# Both halves are needed, and the second is not obvious. The radius test
+# scales with move length, so on its own it misses a corner between *long*
+# moves: a 90° turn between two 28 mm moves measures as a 40 mm radius and
+# slips straight through. But angle alone is worse — genuine arcs in
+# `O1140 - Original.ptp` contain junctions turning up to 46.6° (mean 11.4°),
+# so a bare angle rule shreds real curves. What separates the two is the
+# length of what runs into the junction: a curve arrives as ~0.5 mm chords,
+# while a polygon corner sits between multi-millimetre straights.
+CORNER_DEG = 30.0
+CORNER_MIN_MOVE_MM = 2.0
+# Two moves count as joined when their ends coincide to within this. Values
+# propagate through `_parse` unchanged, so connected moves match exactly; the
+# tolerance is only insurance.
+JOIN_TOL_MM = 1e-6
 
 
 def segment_by_geometry(
-    moves: list[_Move], max_radius: float = ARC_RADIUS_MM, min_length: float = MIN_SEGMENT_MM
+    moves: list[_Move],
+    max_radius: float = ARC_RADIUS_MM,
+    min_length: float = MIN_SEGMENT_MM,
+    corner_deg: float = CORNER_DEG,
+    corner_min_move: float = CORNER_MIN_MOVE_MM,
 ) -> list[tuple[int, int, str]]:
     """Splits a run of moves into straight and curved stretches.
 
@@ -312,6 +361,15 @@ def segment_by_geometry(
     an arc, so it only ends the straight run; an arc needs at least two
     consecutive turning junctions bending the same way. Real G2/G3 moves are
     taken as arcs without measuring.
+
+    Two things stop this reading a path that isn't there. A junction only
+    counts where the moves actually meet: `moves` is the *measured* path, with
+    the rapids between strokes already dropped, so a raster pad arrives as a
+    set of parallel strokes that never join. Taking those for one continuous
+    straight is what collapsed every pad of a 17-pad sweep into a single
+    section. And a turn past `corner_deg` is a corner whatever its moves
+    measure, because a corner is defined by its angle and not by the length of
+    what runs into it.
     """
     n = len(moves)
     if n == 0:
@@ -324,19 +382,36 @@ def segment_by_geometry(
         return math.atan2(dy, dx) if (dx or dy) else None
 
     dirs = [direction(m) for m in moves]
+    # Where the path actually continues from one move into the next. A gap
+    # here is a pen-up: no turn is measured across it and nothing is ever
+    # merged over it.
+    joined_at = [
+        moves[j].end_xy is not None
+        and moves[j + 1].start_xy is not None
+        and math.dist(moves[j].end_xy, moves[j + 1].start_xy) <= JOIN_TOL_MM
+        for j in range(n - 1)
+    ]
+
     # turn[j] is the signed direction change at the junction of move j and j+1.
+    corner_rad = math.radians(corner_deg)
     turn: list[float | None] = []
     turning: list[bool] = []
+    corner: list[bool] = []
     for j in range(n - 1):
         a, b = dirs[j], dirs[j + 1]
-        if a is None or b is None:
+        if a is None or b is None or not joined_at[j]:
             turn.append(None)
             turning.append(False)
+            corner.append(False)
             continue
         t = (b - a + math.pi) % (2 * math.pi) - math.pi
         span = (moves[j].length + moves[j + 1].length) / 2
         turn.append(t)
         turning.append(bool(span) and abs(t) / span > 1.0 / max_radius)
+        corner.append(
+            abs(t) > corner_rad
+            and max(moves[j].length, moves[j + 1].length) >= corner_min_move
+        )
 
     def sustained(j: int) -> bool:
         """True where this junction bends the same way as a neighbour."""
@@ -348,7 +423,11 @@ def segment_by_geometry(
             if 0 <= k < n - 1
         )
 
-    arc_junction = [sustained(j) for j in range(n - 1)]
+    # A corner is never part of an arc, however its neighbours behave. Without
+    # this a polygon reads as a curve: the four 90° turns of a rectangle drawn
+    # with 8 mm sides are each "turning" (radius 5.1 mm) and all bend the same
+    # way, so `sustained` called the whole thing one arc and no corner split it.
+    arc_junction = [sustained(j) and not corner[j] for j in range(n - 1)]
     kinds = [
         "arc"
         if moves[i].curved or any(arc_junction[j] for j in (i - 1, i) if 0 <= j < n - 1)
@@ -358,9 +437,12 @@ def segment_by_geometry(
 
     # A corner splits the straight run it sits in. Junctions *inside* an arc
     # turn too, so only a turning junction that isn't part of an arc counts.
+    # A gap in the path always splits: the two sides are different strokes.
     breaks = {
         j for j in range(n - 1)
-        if (turning[j] and not arc_junction[j]) or kinds[j] != kinds[j + 1]
+        if not joined_at[j]
+        or ((turning[j] or corner[j]) and not arc_junction[j])
+        or kinds[j] != kinds[j + 1]
     }
     runs: list[list] = []
     start = 0
@@ -372,25 +454,71 @@ def segment_by_geometry(
     def run_length(run: list) -> float:
         return sum(moves[i].length for i in range(run[0], run[1] + 1))
 
-    # Absorb slivers, then re-join neighbours that now match.
+    # Absorb slivers, then re-join neighbours that now match. A sliver is only
+    # ever folded into a run the path actually reaches it from — a short
+    # stroke standing on its own is a section in its own right, not a piece of
+    # whatever happens to sit next to it in the file.
     while len(runs) > 1:
-        short = next((r for r, run in enumerate(runs) if run_length(run) < min_length), None)
-        if short is None:
+        for r, run in enumerate(runs):
+            if run_length(run) >= min_length:
+                continue
+            left = runs[r - 1] if r > 0 and joined_at[run[0] - 1] else None
+            right = runs[r + 1] if r + 1 < len(runs) and joined_at[run[1]] else None
+            if left is None and right is None:
+                continue
+            target = left if right is None else right if left is None else (
+                left if run_length(left) >= run_length(right) else right
+            )
+            target[0], target[1] = min(target[0], run[0]), max(target[1], run[1])
+            runs.pop(r)
             break
-        run = runs.pop(short)
-        left = runs[short - 1] if short > 0 else None
-        right = runs[short] if short < len(runs) else None
-        target = left if right is None else right if left is None else (
-            left if run_length(left) >= run_length(right) else right
-        )
-        target[0], target[1] = min(target[0], run[0]), max(target[1], run[1])
+        else:
+            break
     joined: list[list] = []
     for run in runs:
-        if joined and joined[-1][2] == run[2] and joined[-1][1] + 1 == run[0] and run[2] == "arc":
+        if (
+            joined
+            and joined[-1][2] == run[2] == "arc"
+            and joined[-1][1] + 1 == run[0]
+            and joined_at[joined[-1][1]]
+        ):
             joined[-1][1] = run[1]
         else:
             joined.append(run)
     return [(a, b, k) for a, b, k in joined]
+
+
+# A Z change smaller than this is the same deposition plane — noise, or a
+# path that isn't perfectly flat — rather than a new layer.
+LAYER_STEP_MM = 0.05
+
+
+def segment_by_layer(moves: list[_Move], min_step: float = LAYER_STEP_MM) -> list[tuple[int, int, float | None]]:
+    """Splits a run of moves into layers by the Z they deposit at.
+
+    Returns `(first, last, z)` triples of positions in `moves`, covering it in
+    order. A toolpath marker does not mean a layer: in a real parameter-sweep
+    file one `(PAD2_1.2MM_1.28Z_4LAYERS)` block holds all four of its layers,
+    at Z 0.0, 1.28, 2.56 and 3.84. Layers are therefore recovered from Z
+    rather than from the markers.
+
+    Each move is compared against the Z the *current* layer started at, so a
+    path that is merely not perfectly flat stays one layer. A path whose Z
+    climbs continuously — a helix, rather than the flat layers these files
+    hold — has no layers to find and will come back cut every `min_step` of
+    climb; that division is meaningless, so the caller shows the layer count
+    and lets the operator decide whether to use it.
+    """
+    runs: list[list] = []
+    for i, m in enumerate(moves):
+        same = runs and (
+            m.z is None or runs[-1][2] is None or abs(m.z - runs[-1][2]) <= min_step
+        )
+        if same:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i, m.z])
+    return [(a, b, z) for a, b, z in runs]
 
 
 def _unique(values: list[float]) -> list[float]:
@@ -407,9 +535,12 @@ def analyse_toolpaths(
     sections: dict[int, int] | None = None,
     splits: dict[int, list[float]] | None = None,
     geometry: set[int] | dict[int, bool] | None = None,
+    layers: set[int] | dict[int, bool] | None = None,
 ) -> list[Toolpath]:
     """Finds each toolpath and divides it into sections (see module docstring)."""
-    return _analyse(program.lines, _parse(program.lines), sections or {}, splits or {}, geometry or set())
+    return _analyse(
+        program.lines, _parse(program.lines), sections or {}, splits or {}, geometry or set(), layers or set()
+    )
 
 
 def _analyse(
@@ -418,6 +549,7 @@ def _analyse(
     sections: dict[int, int],
     splits: dict[int, list[float]],
     geometry: set[int] | dict[int, bool] = frozenset(),
+    layers: set[int] | dict[int, bool] = frozenset(),
 ) -> list[Toolpath]:
     toolpaths: list[Toolpath] = []
     move_indices = [m.index for m in parsed.moves]
@@ -436,6 +568,15 @@ def _analyse(
             (min(p[0] for p in xy), max(p[0] for p in xy), min(p[1] for p in xy), max(p[1] for p in xy))
             if xy else None
         )
+        # Distance along the measured path at the start of each of its moves,
+        # so a cut on a move boundary can be named as a distance.
+        offset: list[float] = []
+        travelled = 0.0
+        for m in measured:
+            offset.append(travelled)
+            travelled += m.length
+
+        layer_runs = segment_by_layer(measured)
         tp = Toolpath(
             name=name,
             start_index=start,
@@ -444,51 +585,84 @@ def _analyse(
             measured_with_laser=with_laser,
             original_feeds=_unique([parsed.original_feed[m.index] for m in moves if m.index in parsed.original_feed]),
             bounds=bounds,
+            n_layers=len(layer_runs),
+            layer_zs=[z for _, _, z in layer_runs if z is not None],
         )
 
-        kinds: list[str] = []
-        if start in geometry and (not isinstance(geometry, dict) or geometry[start]):
+        def enabled(which) -> bool:
+            return start in which and (not isinstance(which, dict) or which[start])
+
+        # Kind and layer are carried per *move* rather than per section, so
+        # that layer cuts can be merged into whatever division was chosen and
+        # each resulting section can still say which run and which layer it
+        # came from. Reading them positionally off the run list only works
+        # while the sections and the runs are the same list.
+        kind_of_move: list[str] = [""] * len(measured)
+        layer_of_move: list[int] = [0] * len(measured)
+        z_of_move: list[float | None] = [None] * len(measured)
+
+        cuts: list[float] = []
+        if enabled(geometry):
             # Cuts land exactly on move boundaries, so the midpoint rule below
             # reproduces the runs move for move.
-            runs = segment_by_geometry(measured)
-            lengths = [m.length for m in measured]
-            cuts, kinds = [], [k for _, _, k in runs]
-            travelled = 0.0
-            for first, last, _ in runs:
+            for first, last, kind in segment_by_geometry(measured):
                 if first:
-                    cuts.append(travelled)
-                travelled += sum(lengths[first:last + 1])
+                    cuts.append(offset[first])
+                for i in range(first, last + 1):
+                    kind_of_move[i] = kind
         elif start in splits and splits[start]:
-            cuts = sorted(d for d in set(splits[start]) if 0 < d < total)
+            cuts = list(splits[start])
         else:
             n = max(1, int(sections.get(start, 1)))
             cuts = [total * k / n for k in range(1, n)]
+
+        # Layers compose with the division above rather than replacing it:
+        # ticking both gives one section per straight/arc *within* each layer,
+        # which is what a stacked build needs. Layer cuts land on move
+        # boundaries for the same reason geometry cuts do.
+        if enabled(layers) and len(layer_runs) > 1:
+            for number, (first, last, z) in enumerate(layer_runs, start=1):
+                if first:
+                    cuts.append(offset[first])
+                for i in range(first, last + 1):
+                    layer_of_move[i] = number
+                    z_of_move[i] = z
+        cuts = sorted({c for c in cuts if 0 < c < total})
         edges = [0.0, *cuts, total]
 
-        # First measured move belonging to each section (by midpoint distance).
+        # First measured move belonging to each section (by midpoint distance),
+        # as a line index for the section bounds and as a position in
+        # `measured` for the per-move facts above.
         first_move_of_section: list[int | None] = [None] * (len(edges) - 1)
-        travelled = 0.0
-        for m in measured:
-            mid = travelled + m.length / 2
-            p = sum(1 for c in cuts if mid >= c)
+        first_pos_of_section: list[int | None] = [None] * (len(edges) - 1)
+        for i, m in enumerate(measured):
+            mid = offset[i] + m.length / 2
+            p = bisect.bisect_right(cuts, mid)
             if first_move_of_section[p] is None:
                 first_move_of_section[p] = m.index
-            travelled += m.length
+                first_pos_of_section[p] = i
 
         # Section p starts at its first move (section 1 at the toolpath
         # marker) and runs until the next non-empty section starts.
         starts: list[int | None] = [start] + first_move_of_section[1:]
         for p in range(len(edges) - 1):
-            kind = kinds[p] if p < len(kinds) else ""
+            at = first_pos_of_section[p]
+            kind = kind_of_move[at] if at is not None else ""
+            layer = layer_of_move[at] if at is not None else 0
+            z = z_of_move[at] if at is not None else None
             if starts[p] is None:
-                tp.sections.append(ToolpathSection(p + 1, start, start - 1, edges[p], edges[p + 1], [], kind))
+                tp.sections.append(
+                    ToolpathSection(p + 1, start, start - 1, edges[p], edges[p + 1], [], kind, layer, z)
+                )
                 continue
             nxt = next((s for s in starts[p + 1:] if s is not None), end + 1)
             p_start, p_end = starts[p], nxt - 1
             feeds = _unique(
                 [parsed.original_feed[m.index] for m in moves if p_start <= m.index <= p_end and m.index in parsed.original_feed]
             )
-            tp.sections.append(ToolpathSection(p + 1, p_start, p_end, edges[p], edges[p + 1], feeds, kind))
+            tp.sections.append(
+                ToolpathSection(p + 1, p_start, p_end, edges[p], edges[p + 1], feeds, kind, layer, z)
+            )
         toolpaths.append(tp)
 
     return toolpaths
@@ -497,7 +671,10 @@ def _analyse(
 def path_points(program: GCodeProgram, toolpaths: list[Toolpath]) -> list[dict]:
     """The measured path of each toolpath section as plottable XY polylines.
 
-    One dict per vertex: `toolpath` (start index), `section`, `run`, `x`, `y`.
+    One dict per vertex: `toolpath` (start index), `section`, `run`, `x`, `y`,
+    and `t` — how far along its own section the vertex sits, 0 at the start and
+    1 at the end, so a ramped section can be coloured by the feed it actually
+    reaches at that point rather than by one value for the whole section.
     A new run starts whenever the path isn't continuous — laser switched off,
     untracked position, or a new section — so plotted lines don't draw across
     rapids. Uses the same moves as the length measurement (laser-on, or all
@@ -514,18 +691,28 @@ def path_points(program: GCodeProgram, toolpaths: list[Toolpath]) -> list[dict]:
             lo = bisect.bisect_left(move_indices, section.start_index)
             hi = bisect.bisect_right(move_indices, section.end_index)
             last: tuple[float, float] | None = None
+            # Measured along the section's own plotted moves, which is what a
+            # ramp is interpolated over.
+            span = sum(
+                m.length for m in parsed.moves[lo:hi]
+                if not (tp.measured_with_laser and not m.laser_on)
+            )
+            travelled = 0.0
             for m in parsed.moves[lo:hi]:
                 if (tp.measured_with_laser and not m.laser_on) or m.start_xy is None or m.end_xy is None:
                     last = None
                     continue
+                t0 = travelled / span if span > 0 else 0.0
+                t1 = (travelled + m.length) / span if span > 0 else 1.0
                 if last != m.start_xy:
                     run += 1
                     rows.append({"toolpath": tp.start_index, "section": section.number, "run": run,
-                                 "x": m.start_xy[0], "y": m.start_xy[1]})
+                                 "x": m.start_xy[0], "y": m.start_xy[1], "t": t0})
                 if m.end_xy != m.start_xy:
                     rows.append({"toolpath": tp.start_index, "section": section.number, "run": run,
-                                 "x": m.end_xy[0], "y": m.end_xy[1]})
+                                 "x": m.end_xy[0], "y": m.end_xy[1], "t": t1})
                 last = m.end_xy
+                travelled += m.length
     return rows
 
 
@@ -551,19 +738,124 @@ def _set_feed_word(line: str, value: float) -> str:
     return f"{line.rstrip()} {new_word}"
 
 
+# A ramped section interpolates its feed along the path. Values are snapped to
+# RAMP_FEED_STEP so neighbouring moves that land on the same value need no
+# repeated F word — a 500->250 ramp becomes ~11 readable steps, not 86 near
+# identical ones.
+RAMP_FEED_STEP = 25.0
+# The CAM emits curves as ~0.5 mm chords but straights as one or two very long
+# moves, so a ramp across a straight would only step once or twice. Moves
+# longer than this are cut into chords of about this length to give the ramp
+# somewhere to land. Set per-run from the UI's ramp settings.
+DEFAULT_CHORD_MM = 2.0
+
+_AXIS_WORD_RE = re.compile(r"(\([^)]*\))|([XY])\s*([-+]?(?:\d+\.?\d*|\.\d+))", re.IGNORECASE)
+_TRAILING_COMMENT_RE = re.compile(r"\s*\(.*\)\s*$")
+
+
+def round_to_step(value: float, step: float = RAMP_FEED_STEP) -> float:
+    """Snaps a feed to the nearest `step`, never below one whole step."""
+    if step <= 0:
+        return value
+    return max(step, round(value / step) * step)
+
+
+def _format_axis(value: float) -> str:
+    """Matches the source files' axis style: `X8.266`, `X8.0` — always a
+    decimal point, no trailing zero padding."""
+    text = f"{value:.3f}".rstrip("0")
+    return text + "0" if text.endswith(".") else text
+
+
+def ramp_feed_at(section: ToolpathSection, start_feed: float, end_feed: float, distance: float,
+                 step: float = RAMP_FEED_STEP) -> float:
+    """The ramped feed at `distance` mm along the toolpath, for a section
+    running from `start_feed` at its start to `end_feed` at its end."""
+    span = section.to_mm - section.from_mm
+    t = 0.0 if span <= 0 else min(1.0, max(0.0, (distance - section.from_mm) / span))
+    return round_to_step(start_feed + (end_feed - start_feed) * t, step)
+
+
+def _set_axis_words(line: str, x: float, y: float) -> str:
+    """Rewrites the line's X and Y values (outside comments), leaving every
+    other word — G code, comment — as it was."""
+    def sub(match: re.Match) -> str:
+        if match.group(1):
+            return match.group(0)
+        letter = match.group(2).upper()
+        return f"{letter}{_format_axis(x if letter == 'X' else y)}"
+
+    return _AXIS_WORD_RE.sub(sub, line)
+
+
+def _subdividable(line: str, move: _Move, chord_mm: float) -> bool:
+    """True when a move can safely be cut into shorter chords: a straight
+    G1 in the XY plane, with both ends known and no other axis along for the
+    ride (a Z plunge or a rotary move must not be split)."""
+    if move.curved or chord_mm <= 0 or move.length <= chord_mm:
+        return False
+    if move.start_xy is None or move.end_xy is None:
+        return False
+    letters = {letter for letter, _ in _words(line)}
+    return bool(letters & {"X", "Y"}) and not (letters & {"Z", "A", "B", "C", "U", "V", "W"})
+
+
+def _ramp_move_lines(
+    line: str, move: _Move, section: ToolpathSection, start_feed: float, end_feed: float,
+    from_mm: float, chord_mm: float, modal: float | None, step: float = RAMP_FEED_STEP,
+) -> tuple[list[str], float | None]:
+    """The replacement line(s) for one move inside a ramped section.
+
+    A long straight is cut into ~`chord_mm` chords so the feed has somewhere to
+    step; anything else keeps its single line. Each chord is fed at the ramp
+    value for its own midpoint, and an F word is written only where the modal
+    feed would otherwise be wrong — so a run of chords that round to the same
+    value writes it once.
+    """
+    n = 1
+    if _subdividable(line, move, chord_mm):
+        n = max(1, math.ceil(move.length / chord_mm))
+
+    out: list[str] = []
+    (x0, y0), (x1, y1) = move.start_xy or (0.0, 0.0), move.end_xy or (0.0, 0.0)
+    for k in range(n):
+        feed = ramp_feed_at(section, start_feed, end_feed, from_mm + move.length * (k + 0.5) / n, step)
+        if n == 1:
+            text = line
+        else:
+            f = (k + 1) / n
+            text = _set_axis_words(line, x0 + (x1 - x0) * f, y0 + (y1 - y0) * f)
+            if k:
+                # The comment belongs to the move, not to each of its chords.
+                text = _TRAILING_COMMENT_RE.sub("", text)
+        if feed != modal:
+            text = _set_feed_word(text, feed)
+            modal = feed
+        out.append(text)
+    return out, modal
+
+
 @register
 class AdjustSectionFeeds(Fix):
     id = "adjust_section_feeds"
     label = "Adjust feed rate per toolpath section"
     description = (
         "Divides each named toolpath into sections (equal deposition length, at set distances, or "
-        "by straights and arcs) and lets you set a feed rate for each. F words are added/rewritten on "
-        "feed moves only, "
+        "by straights and arcs) and lets you set a feed rate for each — a single value, or a ramp "
+        "between a start and an end feed. F words are added/rewritten on feed moves only, "
         "and the original feed is restated wherever a change would otherwise carry over."
     )
 
     def apply(self, program: GCodeProgram, **options) -> FixResult:
         feeds: dict[tuple[int, int], float] = {k: v for k, v in (options.get("feeds") or {}).items() if v}
+        # A ramp needs both ends; one alone is just a constant feed.
+        ramps: dict[tuple[int, int], tuple[float, float]] = {
+            k: (float(v[0]), float(v[1]))
+            for k, v in (options.get("ramps") or {}).items()
+            if v and v[0] and v[1]
+        }
+        chord_mm = float(options.get("chord_mm") or DEFAULT_CHORD_MM)
+        step = float(options.get("feed_step") or RAMP_FEED_STEP)
         out = program.copy()
         parsed = _parse(program.lines)
         toolpaths = _analyse(
@@ -572,32 +864,88 @@ class AdjustSectionFeeds(Fix):
             options.get("sections") or {},
             options.get("splits") or {},
             options.get("geometry") or set(),
+            options.get("layers") or set(),
         )
         move_indices = [m.index for m in parsed.moves]  # ascending
+        move_by_index = {m.index: m for m in parsed.moves}
+
+        # Distance along each toolpath's measured path at the start of every
+        # move, on the same measure `_analyse` used for the section edges, so a
+        # ramp lines up with the from_mm/to_mm the UI shows.
+        dist_at: dict[int, float] = {}
+        for tp in toolpaths:
+            lo = bisect.bisect_left(move_indices, tp.start_index)
+            hi = bisect.bisect_right(move_indices, tp.end_index)
+            moves = parsed.moves[lo:hi]
+            measured = [m for m in moves if m.laser_on]
+            if not (measured and sum(m.length for m in measured) > 0):
+                measured = moves
+            travelled = 0.0
+            for m in measured:
+                dist_at[m.index] = travelled
+                travelled += m.length
 
         # Line index -> (override feed, toolpath, section) for feed moves in
-        # overridden sections.
+        # sections given a single feed, and the same for ramped sections.
         override_at: dict[int, tuple[float, Toolpath, ToolpathSection]] = {}
-        n_overridden = 0
+        ramp_at: dict[int, tuple[Toolpath, ToolpathSection, float, float]] = {}
+        n_overridden = n_ramped = 0
         for tp in toolpaths:
             for section in tp.sections:
-                value = feeds.get((tp.start_index, section.number))
-                if value is None or section.is_empty:
+                if section.is_empty:
                     continue
-                n_overridden += 1
+                key = (tp.start_index, section.number)
                 lo = bisect.bisect_left(move_indices, section.start_index)
                 hi = bisect.bisect_right(move_indices, section.end_index)
+                if key in ramps:
+                    n_ramped += 1
+                    start_feed, end_feed = ramps[key]
+                    for idx in move_indices[lo:hi]:
+                        ramp_at[idx] = (tp, section, start_feed, end_feed)
+                    continue
+                value = feeds.get(key)
+                if value is None:
+                    continue
+                n_overridden += 1
                 for idx in move_indices[lo:hi]:
                     override_at[idx] = (value, tp, section)
 
         changes: list[LineChange] = []
         modal: float | None = None
         move_set = set(move_indices)
+        new_lines: list[str] = []
+        n_added = 0
         for i, line in enumerate(program.lines):
             if i not in move_set:
                 if i in parsed.explicit_feed:
                     modal = parsed.explicit_feed[i]
+                new_lines.append(line)
                 continue
+
+            if i in ramp_at and i in dist_at:
+                tp, at, start_feed, end_feed = ramp_at[i]
+                replacement, modal = _ramp_move_lines(
+                    line, move_by_index[i], at, start_feed, end_feed, dist_at[i], chord_mm, modal, step
+                )
+                new_lines.extend(replacement)
+                if replacement != [line]:
+                    n_added += len(replacement) - 1
+                    detail = f" over {len(replacement)} chords" if len(replacement) > 1 else ""
+                    changes.append(
+                        LineChange(
+                            kind="modified",
+                            original_index=i,
+                            original_text=line,
+                            new_text="\n".join(replacement),
+                            label=tp.name,
+                            reason=(
+                                f"section {at.number}/{len(tp.sections)}: ramp "
+                                f"F{format_feed(start_feed)}->F{format_feed(end_feed)}{detail}"
+                            ),
+                        )
+                    )
+                continue
+
             if i in override_at:
                 desired, tp, at = override_at[i]
                 reason = f"section {at.number}/{len(tp.sections)}: F{format_feed(desired)}"
@@ -605,13 +953,15 @@ class AdjustSectionFeeds(Fix):
                 desired = parsed.original_feed.get(i)
                 tp, reason = None, "restores original feed"
             if desired is None:
+                new_lines.append(line)
                 continue
             has_f = i in parsed.explicit_feed
             if (has_f and parsed.explicit_feed[i] == desired) or (not has_f and modal == desired):
                 modal = desired
+                new_lines.append(line)
                 continue
             new_line = _set_feed_word(line, desired)
-            out.lines[i] = new_line
+            new_lines.append(new_line)
             modal = desired
             changes.append(
                 LineChange(
@@ -624,8 +974,16 @@ class AdjustSectionFeeds(Fix):
                 )
             )
 
-        return FixResult(
-            program=out,
-            summary=f"Set {n_overridden} section feed override(s); {len(changes)} line(s) get a new or restated F word.",
-            changes=changes,
+        out.lines = new_lines
+        bits = []
+        if n_overridden:
+            bits.append(f"{n_overridden} section feed override(s)")
+        if n_ramped:
+            bits.append(f"{n_ramped} ramped section(s)")
+        summary = (
+            f"Set {' and '.join(bits) or 'no feed overrides'}; "
+            f"{len(changes)} line(s) get a new or restated F word."
         )
+        if n_added:
+            summary += f" {n_added} line(s) added by splitting long moves into ~{chord_mm:g} mm chords."
+        return FixResult(program=out, summary=summary, changes=changes)

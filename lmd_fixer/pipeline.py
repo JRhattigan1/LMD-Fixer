@@ -66,7 +66,11 @@ def apply_accepted_changes(original: GCodeProgram, result: FixResult, accepted_i
         if change is not None:
             end = change.end_index if change.end_index is not None else change.original_index
             if change.kind != "removed":
-                new_lines.append(change.new_text if change.new_text is not None else out.lines[i])
+                text = change.new_text if change.new_text is not None else out.lines[i]
+                # A "modified" change may expand one line into several (a long
+                # move split into chords), carried as newline-separated text —
+                # a program line must never contain a newline itself.
+                new_lines.extend(text.split("\n"))
             i = end + 1
             continue
         if i in removed_or_replaced:

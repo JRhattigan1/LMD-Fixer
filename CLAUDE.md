@@ -60,6 +60,18 @@ data files are excluded from wheels).
   whose correctness is genuinely uncertain, default to the safe (keep) side
   and give the UI its own rendering branch in `app.py` rather than reusing
   the generic accept-by-default checklist.
+- **Changing the fix selection mid-review asks before discarding.** The review
+  restarts from the original file whenever the chosen set of fixes changes,
+  because the program has already been through the fixes behind the current
+  step. That's free before the first step, so it just happens; past that it
+  would throw away applied work, so the app warns, shows was/now, offers
+  *Keep my review* or *Start over with this selection*, and `st.stop()`s —
+  **nothing is mutated until the user picks**. Making that undoable is why the
+  sidebar toggles are keyed (`FIX_TOGGLE_KEY`): *Keep* writes the previous
+  selection back into them. A new *file* still resets silently — there's
+  nothing worth keeping. Don't collapse `file_key` and `selection` back into
+  one `state_key`; that was the bug (a brushed toggle four steps in wiped
+  everything with no warning).
 - **Streamlit state gotchas already handled in `app.py`** — don't undo them:
   a keyed checkbox ignores its `value=` once the key exists in session
   state, so the "Accept all" / "Remove all sections" master checkboxes push
@@ -113,6 +125,54 @@ data files are excluded from wheels).
     (`render_feed_sections_step`) previews and applies them all-or-nothing
     instead of per-line accept. It proposes nothing without options, so it
     must stay ahead of the generic "no changes" branch in `app.py`.
+  - A section takes either one feed or a **ramp** between a start and an end
+    feed. In the UI these are two dicts keyed identically — `feeds_state`
+    holds the start, `ramps_state` the optional end — and the fix takes them
+    as `ramps: {(toolpath, section): (start, end)}`, which wins over `feeds`
+    for that section. A ramp needs both ends; one alone is ignored. Two
+    numbers from the real files drive the whole design, and neither is
+    obvious: feeds are snapped to `RAMP_FEED_STEP` (25 mm/min) so a run of
+    moves rounding to the same value writes **one** F word rather than dozens
+    of near-identical ones, and long moves are cut into `chord_mm` chords
+    because the CAM emits curves as ~0.5 mm chords but **straights as one or
+    two very long moves** — a 26 mm straight is 2 moves, so without splitting
+    a ramp across it could only step once. Only plain XY G1 moves are split
+    (`_subdividable`); a Z plunge, a rotary move or a real G2/G3 arc is left
+    whole, and the last chord lands on the original endpoint exactly, so the
+    path is unchanged to the 3 dp the files are written at. Chord length is a
+    machine/material preference, not a per-file review choice, so it lives in
+    a ⚙ popover (`render_ramp_settings`) under `RAMP_CHORD_KEY` — like the map
+    display keys, deliberately **not** `accept_*`-prefixed, so it outlives the
+    state reset. Ramping is the one thing here that *adds* lines: a
+    `"modified"` `LineChange` may now carry several lines joined by `\n`, and
+    `apply_accepted_changes` splits them back out, since a program line must
+    never contain a newline itself.
+  - The map colours **per vertex**, not per section, so a ramp shades along
+    its length the way the machine will run it. `path_points` therefore
+    returns `t` (0→1 along each section) and `build_toolpath_map` takes
+    `ramp_for_section` to interpolate. A line mark is one flat colour per
+    *segment*, so a section only reads as a gradient if it has vertices to
+    break it up — and the same lopsidedness that forces chord-splitting in the
+    G-code bites here: 7 of the 16 straights in a test toolpath arrive as a
+    single segment, which can only ever be one colour, so a ramp on a straight
+    looked like it hadn't applied. `densify_ramped_path` inserts plotting
+    vertices inside ramped sections only, one per `RAMP_FEED_STEP` the feed
+    crosses — exactly the number of distinct colours the section can show, so
+    it costs nothing extra. It's display-only: `path_points` stays geometry-
+    honest and the G-code was always right.
+  - Map payload is worth watching: the whole-bed view is ~11,000 vertices, and
+    it is rebuilt and re-sent on **every** rerun. Keep `pts` to the columns
+    Vega actually encodes — everything the tooltip shows is per *section* and
+    is joined on in the browser via `transform_lookup` against `section_desc`
+    (~1,300 rows), and x/y are rounded to the 3 dp the source files use. That
+    took the spec from 5.19 MB to 3.08 MB. Note that layers sharing one
+    DataFrame is **not** where the savings are: Altair already hashes identical
+    frames into a single `datasets` entry, so `alt.layer(..., data=pts)` is
+    about saying once where the vertices come from, not about size. A `format_func` that closes over
+    `feeds_state` re-labels its options from whatever the dict holds *later*
+    in the run, after the section table has written to it — so the jump
+    selectbox's labels are built eagerly into a dict and bound as a default
+    argument, the same rule the widget callbacks follow.
     The step is laid out as **map beside editor** in one `st.columns` row, so
     a section can be picked and re-fed without scrolling between the two —
     that was a direct complaint about the earlier stacked layout. Both are
@@ -196,10 +256,71 @@ data files are excluded from wheels).
     an *arc* needs at least two consecutive junctions turning the same way
     (a lone turning junction is a sharp corner, which ends a straight run but
     isn't an arc), and runs under `MIN_SEGMENT_MM` are absorbed into a
-    neighbour. Both test programs split into 29 parts per layer — 16
+    neighbour. Both O1140 programs split into 29 sections per layer — 16
     straights and 13 arcs. Geometry cuts land exactly on move boundaries, so
     they're fed through the same `splits` machinery and the midpoint rule
     reproduces the runs move for move.
+    Two further rules exist because the radius test alone was silently wrong
+    on real files, and both cost a whole file's worth of usefulness before
+    they were found. **A junction only counts where the moves actually meet.**
+    `moves` is the *measured* path, with the laser-off repositioning already
+    dropped, so a raster pad arrives as parallel strokes that never join —
+    all 78 laser-on moves of `PAD2` in `O1145.ptp` are disconnected from the
+    next, and reading them as one continuous straight collapsed every pad in
+    that file to a single section. `joined_at` gates the turn measurement,
+    the breaks, the sliver absorption and the arc re-join. **And a sharp
+    corner is always split out, never absorbed into an arc.** That rule needs
+    all three of its parts, and the reasoning is worth keeping because each
+    part alone is wrong:
+    - The radius test divides by move length, so on its own it misses a
+      corner between *long* moves — a 90° turn between two 28 mm moves reads
+      as a 40 mm radius and slips through, collapsing a rectangle drawn as
+      four long moves into one "straight".
+    - But **angle alone is worse.** Genuine arcs in `O1140 - Original.ptp`
+      hold junctions turning up to **46.6°** (mean 11.4°), so a bare
+      `> CORNER_DEG` rule shreds real curves. What separates the two is the
+      length of what runs into the junction: a curve arrives as ~0.5 mm
+      chords, a polygon corner sits between multi-millimetre straights —
+      hence `CORNER_MIN_MOVE_MM` (2 mm) on the longer of the two moves.
+    - And `arc_junction` must subtract corners (`sustained(j) and not
+      corner[j]`), or a polygon still reads as a curve: the four 90° turns of
+      a rectangle with 8 mm sides are each "turning" (radius 5.1 mm) and all
+      bend the same way, so `sustained` called the whole shape one arc and no
+      corner could split it.
+
+    Shapes worth re-checking after any change here: rectangles at 30/50, 8, 4
+    and 2.5 mm sides, an L, a zigzag and an octagon should each split at
+    every corner, while a circle of 0.5 mm chords stays one arc and
+    straight-arc-straight stays three sections.
+  - **A toolpath marker is not a layer.** In `O1145.ptp` one
+    `(PAD2_1.2MM_1.28Z_4LAYERS)` block holds all four of its layers, at Z
+    0.0 / 1.28 / 2.56 / 3.84 — the Z-step the name promises. `segment_by_layer`
+    recovers them from the Z each move deposits at (`_Move.z`), starting a new
+    layer when Z departs from the *current layer's* Z by more than
+    `LAYER_STEP_MM`, so a path that merely isn't flat stays one layer. A
+    continuously climbing path has no layers to find and comes back cut every
+    `LAYER_STEP_MM` of climb; that division is meaningless, which is why the
+    UI shows the layer count and the Z levels and lets the operator decide
+    rather than dividing on its own.
+    Layers **compose with** whichever division is chosen rather than replacing
+    it — ticking Layers and Lines & arcs gives one section per straight/arc
+    *within* each layer. That is why `kind` and `layer` are carried per *move*
+    in `_analyse` and read off each section's first move, instead of being
+    indexed positionally off the run list: once layer cuts are merged into the
+    geometry cuts, sections and runs are no longer the same list. Layers also
+    prefix `spec_for` (`"L+geo"`), since toggling them renumbers every section
+    and must invalidate the feed keys.
+    Two numbers from the real files are worth keeping: a pad's layers
+    cross-hatch, so `PAD2` comes out 15 / 24 / 15 / 24 strokes per layer (a
+    28×18 mm pad at 1.2 mm stepover, rastered the long way then the short
+    way), and the 17 pads have *different* Z-steps — that file is a Z-step
+    sweep, so the layer Z values differ per pad and can't be assumed shared.
+    On the map, layers of one build occupy the same footprint and stack into
+    an unreadable pile, so the **Show layer** filter beside the map is the
+    only way to see a single layer of a stacked build at all. The `Layer`
+    tooltip column is *dropped* from `section_desc`, not merely left out of
+    the tooltip field list, when nothing is layer-split — the frame is
+    serialised into the spec whole, so an unused column is pure payload.
   - Line endings in source `.ptp` files are CRLF; output is written back as
     CRLF (`GCodeProgram.to_text("\r\n")`) since that's what the machine
     controller expects, even though the UI displays with `\n` for
@@ -207,7 +328,12 @@ data files are excluded from wheels).
 - `lmd_fixer/tests/` holds real example files (`O1140 - Original.ptp` is the
   unedited original; `O1140.ptp` is the user's manually-fixed reference
   version) — useful for verifying a fix's output against a known-good
-  target, not just for eyeballing regex matches. These `.ptp` files are
+  target, not just for eyeballing regex matches. **Check anything touching
+  segmentation against `O1145.ptp` as well as the O1140 pair**: it is a
+  17-pad Z-step sweep, its pads are rasters rather than contoured coupons,
+  and its layers live inside single markers, so it exercises paths O1140
+  cannot reach. Both of the segmentation bugs above passed on O1140 while
+  making O1145 useless. These `.ptp` files are
   git-ignored (proprietary project data, kept out of the public repo), so
   they exist only on the user's machine — a fresh clone won't have them. Full-accept of the whole
   pipeline reproduces the reference except for known review-choice
@@ -224,3 +350,20 @@ snippet (see recent commits for the pattern: `run_fix` then
 `apply_accepted_changes` with `{c.original_index for c in result.changes}`
 for full-accept, or a subset to check partial-accept behaves correctly) and
 sanity-check the before/after line counts and a few sample changes.
+
+Full-pipeline check against the reference: run `FIX_ORDER` accepting every
+change **except** in `remove_named_sections`, where accepting everything
+removes all 45 sections and leaves 21 lines. Done that way the result differs
+from `O1140.ptp` by exactly the documented deltas — 45 `G90 G0 A0.0`, 3
+dwells, 6 `M325`, plus blank lines.
+
+The UI is reachable headlessly with `streamlit.testing.v1.AppTest`, which is
+worth the setup for changes to `render_feed_sections_step`. Two things make it
+work: `st.file_uploader` has to be stubbed (patch it, then `exec` `app.py` from
+a wrapper script that AppTest loads), and **session state has to be seeded
+*after* the first `at.run()`** — the first run calls `_start_review`, which
+clears every `accept_*` key and would wipe anything set beforehand. Prefer
+driving the real widgets (`at.checkbox[...].set_value`) over writing division
+state directly: the tables cache a base frame per `ver`, so state poked in
+behind them is overwritten by the write-back on the next run. Session state
+keeps a frame per `ver`, so read the newest, not the first match.
