@@ -23,7 +23,9 @@ class FixRunResult:
 
 
 def run_fix(program: GCodeProgram, fix_id: str, options: dict | None = None) -> FixRunResult:
-    fix_cls = available_fixes().get(fix_id)
+    # A fix named explicitly runs even if fix_settings.toml switches it off —
+    # that file only controls which fixes the app offers.
+    fix_cls = available_fixes(include_disabled=True).get(fix_id)
     if fix_cls is None:
         raise KeyError(f"Unknown fix id: {fix_id}")
     result = fix_cls().apply(program, **(options or {}))

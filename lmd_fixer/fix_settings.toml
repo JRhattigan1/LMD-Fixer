@@ -1,0 +1,15 @@
+# Which fixes the app offers.
+#
+#   true  = the fix appears in the sidebar as normal
+#   false = the fix is switched off: hidden from the sidebar and never run
+#
+# Save the file and refresh the browser tab to pick up a change.
+# A fix missing from this list counts as `true`, so a newly added fix shows
+# up without having to be listed here first.
+
+[fixes]
+remove_rotary_table = true
+remove_named_sections = true
+remove_repeated_p_calls = true
+remove_dwells = true
+adjust_section_feeds = false

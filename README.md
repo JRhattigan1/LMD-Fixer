@@ -66,6 +66,13 @@ Fixes always run in this order, independent of sidebar tick order:
    determined from the file alone. Each is proposed for removal along with
    the P value it follows, and you decide per occurrence whether to keep it.
 
+## Switching fixes off
+
+`lmd_fixer/fix_settings.toml` lists every fix with `true` or `false`. Set a
+fix to `false` and it disappears from the sidebar and never runs; save the
+file and refresh the browser tab to pick up the change. A fix not listed
+there counts as on. (This only affects what the app offers — `run_fix` /
+`run_pipeline` from a script still run any fix you name explicitly.)
 
 ## Project layout
 

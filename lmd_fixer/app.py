@@ -1669,8 +1669,11 @@ elif st.session_state.get("selection") != selection:
             f"**You're {steps_done} step(s) into this review.** Changing which fixes run starts it "
             "over from the original file — everything applied so far would be undone."
         )
+        # `previous` can name a fix since switched off in fix_settings.toml,
+        # so look labels up in the full registry, not just the enabled fixes.
+        all_fixes = available_fixes(include_disabled=True)
         st.caption(
-            f"Was: {', '.join(fixes[f]().label or f for f in previous) or 'nothing'}  \n"
+            f"Was: {', '.join(all_fixes[f]().label or f for f in previous) or 'nothing'}  \n"
             f"Now: {', '.join(fixes[f]().label or f for f in selection) or 'nothing'}"
         )
 

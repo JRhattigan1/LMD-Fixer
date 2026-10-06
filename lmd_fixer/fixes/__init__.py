@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from lmd_fixer.gcode import GCodeProgram
+from lmd_fixer.settings import disabled_fix_ids
 
 _REGISTRY: dict[str, type["Fix"]] = {}
 
@@ -85,8 +86,17 @@ def register(fix_cls: type[Fix]) -> type[Fix]:
     return fix_cls
 
 
-def available_fixes() -> dict[str, type[Fix]]:
-    return dict(_REGISTRY)
+def available_fixes(include_disabled: bool = False) -> dict[str, type[Fix]]:
+    """Registered fixes, minus any switched off in `fix_settings.toml`.
+
+    `include_disabled=True` returns every registered fix regardless — for
+    callers that name a fix explicitly (e.g. `run_fix` from a script) rather
+    than offering a menu of them.
+    """
+    if include_disabled:
+        return dict(_REGISTRY)
+    disabled = disabled_fix_ids()
+    return {fid: cls for fid, cls in _REGISTRY.items() if fid not in disabled}
 
 
 __all__ = [

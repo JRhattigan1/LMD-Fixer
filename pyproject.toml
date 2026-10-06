@@ -18,3 +18,6 @@ lmd-fixer = "lmd_fixer.cli:main"
 [tool.setuptools.packages.find]
 include = ["lmd_fixer*"]
 exclude = ["lmd_fixer.tests*"]
+
+[tool.setuptools.package-data]
+lmd_fixer = ["fix_settings.toml"]
