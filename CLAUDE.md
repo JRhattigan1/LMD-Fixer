@@ -14,7 +14,8 @@ often context-dependent and the user wants a chance to check each one.
 Run it with `streamlit run lmd_fixer/app.py` from a checkout, or via the
 `lmd-fixer` console command once pip-installed (entry point in
 `lmd_fixer/cli.py`, packaging in `pyproject.toml`; the `lmd_fixer.tests`
-data files are excluded from wheels).
+data files are excluded from wheels). For people without Python there's a
+standalone Windows build (`packaging/build.ps1`, see *Windows build* below).
 
 ## Architecture
 
@@ -34,12 +35,12 @@ data files are excluded from wheels).
   - Fixes must NOT rely on line indices from a different fix's output — each
     fix is only ever handed the program as it exists after the prior fix's
     *accepted* changes were applied (see `pipeline.apply_accepted_changes`).
-- `lmd_fixer/pipeline.py` — `run_fix` (runs one fix), `apply_accepted_changes`
+- `lmd_fixer/pipeline.py` — `FIX_ORDER` (the fixed run order), `run_fix` (runs one fix), `apply_accepted_changes`
   (rebuilds a program keeping only the changes the user accepted, handling
   both single lines and ranges), and `run_pipeline` (applies every fix
   unconditionally with no review — kept for scripting, not used by the UI).
 - `lmd_fixer/app.py` — Streamlit UI. Runs fixes one at a time in a fixed pipeline
-  order (`FIX_ORDER`), independent of sidebar tick order. Holds
+  order (`pipeline.FIX_ORDER`), independent of sidebar tick order. Holds
   `original_program` and `current_program` in `st.session_state` so the
   final screen can render a side-by-side diff of the untouched upload
   against the fully-reviewed result.
@@ -49,7 +50,7 @@ data files are excluded from wheels).
 - **Fix order is meaningful and enforced**, not just cosmetic. Later fixes
   depend on earlier ones having already run (e.g. dwell review only sees
   dwells that survive repeated-P-call collapsing). If you add a fix with an
-  ordering dependency, add its id to `FIX_ORDER` in `app.py` at the correct
+  ordering dependency, add its id to `FIX_ORDER` in `pipeline.py` at the correct
   position — don't rely on sidebar order.
 - **Default review state varies by fix and is a deliberate choice, not an
   oversight.** Most fixes default every proposed change to "accept" (the
@@ -341,6 +342,42 @@ data files are excluded from wheels).
   9 genuine-P-change dwells, and removes the `M325` alongside each dwell it
   removes at a genuine P change (no fix covers that M325 case yet). Ignore
   the `(PROGRAM CREATED ...)` timestamp header line when diffing.
+
+## Windows build
+
+`packaging/build.ps1` makes `dist/LMD-Fixer-<version>-win64.zip`: a PyInstaller
+**one-folder** build (one-file unpacks ~200 MB to temp on every launch and is
+what antivirus flags), built from the pins in `packaging/requirements-build.txt`
+in a venv under `%LOCALAPPDATA%\LMD-Fixer-build`, which is kept out of OneDrive
+because a build is thousands of files. Things that look removable but aren't:
+
+- `cli.py` is the launcher for both `lmd-fixer` and the `.exe`. Its
+  `LOCAL_APP_ARGS` each fix a real failure: `server.address=127.0.0.1`
+  (Streamlit otherwise listens on every interface, exposing uploaded files to
+  the network), `server.headless=true` (otherwise Streamlit's first-run email
+  prompt blocks a double-clicked exe on console input — the browser is opened
+  by `_open_browser_when_ready` once `/_stcore/health` answers instead), and
+  `global.developmentMode=false` (a frozen build has no site-packages, so
+  Streamlit thinks it's a Streamlit source checkout and ignores the port). The
+  port is the first free one from 8501, so a dev server or second copy doesn't
+  stop it starting.
+- Streamlit has no PyInstaller hook, so the spec `collect_all`s it and copies
+  its metadata. `app.py` ships as a data file as well as being analysed
+  (`streamlit run` executes it from disk), and the app's own imports are found
+  by listing `lmd_fixer`'s submodules, since the entry script only imports
+  `cli`.
+- A build can't edit the `fix_settings.toml` inside `_internal`, so the
+  launcher sets `LMD_FIXER_SETTINGS` (read by `settings.settings_path()`) to the
+  copy beside the `.exe`, falling back to `%APPDATA%\LMD-Fixer`. The sidebar
+  shows which file is in use.
+- `--selftest [IN OUT]` loads the app through AppTest and runs the reference
+  pipeline (accept everything except section removal). The build script runs
+  it through both the `.exe` and the source and fails unless the outputs are
+  byte-identical, which is the check that the frozen app really behaves the
+  same. The UI itself was checked by driving headless Edge over the DevTools
+  protocol; Edge's `--screenshot` / `--dump-dom` capture before the websocket
+  delivers the page, so they show only the loading skeleton, even for a
+  working dev server.
 
 ## Testing changes
 

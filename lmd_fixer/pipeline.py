@@ -7,6 +7,19 @@ from dataclasses import dataclass, field
 from lmd_fixer.fixes import FixResult, available_fixes
 from lmd_fixer.gcode import GCodeProgram
 
+# Fixed run order: rotary table cleanup, then optional named-section removal,
+# then repeated M98/M325 program calls are collapsed, and only then are the
+# surviving G4 X25.00 dwells (genuine P-value changes) put up for manual review.
+# Feed adjustment runs last so it only divides toolpaths that survived removal.
+# The UI runs fixes in this order whatever order they're ticked in.
+FIX_ORDER = [
+    "remove_rotary_table",
+    "remove_named_sections",
+    "remove_repeated_p_calls",
+    "remove_dwells",
+    "adjust_section_feeds",
+]
+
 
 @dataclass
 class PipelineResult:

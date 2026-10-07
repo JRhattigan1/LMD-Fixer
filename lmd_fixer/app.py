@@ -21,6 +21,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from lmd_fixer import __version__
 from lmd_fixer.fixes import available_fixes
 from lmd_fixer.fixes.adjust_section_feeds import (
     DEFAULT_CHORD_MM,
@@ -32,7 +33,8 @@ from lmd_fixer.fixes.adjust_section_feeds import (
     round_to_step,
 )
 from lmd_fixer.gcode import GCodeProgram
-from lmd_fixer.pipeline import apply_accepted_changes, run_fix
+from lmd_fixer.pipeline import FIX_ORDER, apply_accepted_changes, run_fix
+from lmd_fixer.settings import settings_path
 
 # Only render per-change context previews when the list is small enough for
 # them to be useful rather than overwhelming (and cheap enough to render).
@@ -1585,17 +1587,6 @@ st.write("")
 
 fixes = available_fixes()
 
-# Fixed run order: rotary table cleanup, then optional named-section removal,
-# then repeated M98/M325 program calls are collapsed, and only then are the
-# surviving G4 X25.00 dwells (genuine P-value changes) put up for manual review.
-# Feed adjustment runs last so it only divides toolpaths that survived removal.
-FIX_ORDER = [
-    "remove_rotary_table",
-    "remove_named_sections",
-    "remove_repeated_p_calls",
-    "remove_dwells",
-    "adjust_section_feeds",
-]
 ordered_fix_ids = [fid for fid in FIX_ORDER if fid in fixes]
 ordered_fix_ids += [fid for fid in fixes if fid not in ordered_fix_ids]
 
@@ -1612,6 +1603,12 @@ with st.sidebar:
         checked = st.toggle(fix.label or fix_id, help=fix.description, key=FIX_TOGGLE_KEY.format(fix_id))
         if checked:
             selected_ids.append(fix_id)
+    # Says which file to edit, since a packaged build reads one beside the .exe
+    # rather than the copy in the package.
+    st.caption(
+        f"v{__version__} · fixes switched on/off in `{settings_path().name}`",
+        help=f"Edit {settings_path()} and refresh the page to change which fixes are offered.",
+    )
 
 uploaded = st.file_uploader(
     "G-code file", type=["ptp", "nc", "txt", "gcode"], label_visibility="collapsed"
