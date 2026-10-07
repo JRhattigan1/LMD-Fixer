@@ -545,6 +545,143 @@ def densify_ramped_path(points: list[dict], ramp_for_section: dict) -> list[dict
     return out
 
 
+def _plan_view(boxes: pd.DataFrame, size: int) -> tuple[alt.Scale, alt.Scale, float, float]:
+    """X/Y scales and pixel size for a true-aspect plan view of `boxes`
+    (columns x0, x1, y0, y1): one millimetre is the same number of pixels on
+    both axes, so a square part looks square. `size` is the long edge in
+    pixels; the short axis gets whatever that scale gives it. The caller must
+    render with width="content" or Streamlit stretches the width to the
+    container and the aspect goes with it."""
+    x_lo, x_hi = boxes["x0"].min() - 3, boxes["x1"].max() + 3
+    y_lo, y_hi = boxes["y0"].min() - 3, boxes["y1"].max() + 3
+    span_x, span_y = max(x_hi - x_lo, 1e-6), max(y_hi - y_lo, 1e-6)
+    px_per_mm = size / max(span_x, span_y)
+    return (
+        alt.Scale(domain=[x_lo, x_hi], zero=False, nice=False),
+        alt.Scale(domain=[y_lo, y_hi], zero=False, nice=False),
+        span_x * px_per_mm,
+        span_y * px_per_mm,
+    )
+
+
+# What stays and what goes on the section-removal map. Validated as a pair
+# against the app surface (#272b33) with the dataviz skill's
+# validate_palette.py (deutan ΔE 9.9). The red sits just under 3:1 on that
+# surface, so it is never the only cue: a toolpath ticked for removal is also
+# dashed, its box is tinted, the tooltip says so, and the checklist beside the
+# map is the table view. The app's teal accent is too light to pass the
+# lightness band, which is why "kept" isn't simply ACCENT.
+REMOVAL_KEPT = "#1baf7a"
+REMOVAL_GONE = "#d03b3b"
+REMOVAL_STATUS = ["Kept", "To remove"]
+REMOVAL_SELECTION = "removal_pick"
+REMOVAL_HOVER = "removal_hover"
+
+
+def toolpath_from_removal_selection(chart_state) -> int | None:
+    """Start line of the toolpath clicked on the removal map, or None for a
+    click on empty space."""
+    picked = _selected_keys(chart_state, REMOVAL_SELECTION, "toolpath")
+    return int(picked[0]) if picked else None
+
+
+def build_removal_map(
+    points: list[dict], labels: dict[int, dict[str, str]], removing: set[int], size: int = 520
+) -> alt.LayerChart | None:
+    """Plan view of the bed for the section-removal step: every toolpath's
+    deposition path, solid teal if it stays and dashed red if it's ticked for
+    removal, under a box per toolpath that is the click target.
+
+    `labels` maps a toolpath's start line to the tooltip fields shown for it
+    (name, part, lines). `removing` holds the start lines ticked for removal.
+    """
+    if not points:
+        return None
+    pts = pd.DataFrame(points)[["toolpath", "run", "x", "y"]]
+    pts["x"] = pts["x"].round(3)
+    pts["y"] = pts["y"].round(3)
+    pts["status"] = [REMOVAL_STATUS[t in removing] for t in pts["toolpath"]]
+    pts["order"] = range(len(pts))
+
+    boxes = (
+        pts.groupby("toolpath", as_index=False)
+        .agg(x0=("x", "min"), x1=("x", "max"), y0=("y", "min"), y1=("y", "max"))
+    )
+    boxes[["x0", "y0"]] -= 2
+    boxes[["x1", "y1"]] += 2
+    boxes["status"] = [REMOVAL_STATUS[t in removing] for t in boxes["toolpath"]]
+    boxes["Click to"] = ["keep it" if t in removing else "remove it" for t in boxes["toolpath"]]
+    fields = list(next(iter(labels.values()), {}))
+    for name in fields:
+        boxes[name] = [labels.get(t, {}).get(name, "") for t in boxes["toolpath"]]
+
+    x_scale, y_scale, width, height = _plan_view(boxes, size)
+    status_colours = alt.Scale(domain=REMOVAL_STATUS, range=[REMOVAL_KEPT, REMOVAL_GONE])
+    # Same field, same (empty) title and the same legend on both channels, so
+    # Vega-Lite merges them into one legend whose symbols show the dash too.
+    legend = alt.Legend(title=None, orient="top", symbolType="stroke", symbolStrokeWidth=2)
+
+    paths = (
+        alt.Chart(pts)
+        .mark_line(strokeWidth=2, strokeCap="round", strokeJoin="round")
+        .encode(
+            x=alt.X("x:Q", title="X (mm)", scale=x_scale),
+            y=alt.Y("y:Q", title="Y (mm)", scale=y_scale),
+            detail="run:N",
+            order="order:Q",
+            color=alt.Color("status:N", scale=status_colours, legend=legend),
+            strokeDash=alt.StrokeDash(
+                "status:N", scale=alt.Scale(domain=REMOVAL_STATUS, range=[[1, 0], [5, 3]]), legend=legend
+            ),
+        )
+    )
+
+    pick = alt.selection_point(name=REMOVAL_SELECTION, fields=["toolpath"], on="click")
+    hover = alt.selection_point(name=REMOVAL_HOVER, fields=["toolpath"], on="pointerover", clear="pointerout")
+    is_gone = alt.datum.status == REMOVAL_STATUS[1]
+    targets = (
+        alt.Chart(boxes)
+        .mark_rect(cornerRadius=4)
+        .encode(
+            x=alt.X("x0:Q", scale=x_scale),
+            x2="x1:Q",
+            y=alt.Y("y0:Q", scale=y_scale),
+            y2="y1:Q",
+            fill=alt.condition(is_gone, alt.value(REMOVAL_GONE), alt.value("#ffffff")),
+            fillOpacity=alt.condition(is_gone, alt.value(0.14), alt.value(0.02)),
+            stroke=alt.condition(
+                hover, alt.value(MAP_FOCUS),
+                alt.Stroke("status:N", scale=alt.Scale(
+                    domain=REMOVAL_STATUS, range=["rgba(255,255,255,0.10)", REMOVAL_GONE]
+                ), legend=None),
+                empty=False,
+            ),
+            strokeWidth=alt.condition(hover, alt.value(2), alt.value(1), empty=False),
+            tooltip=[f"{f}:N" for f in fields] + ["Click to:N"],
+        )
+        .add_params(pick, hover)
+    )
+
+    # A cross on each toolpath going, so the state doesn't hang on the colour
+    # channel: on a dense raster pad the dashes run together and read as a
+    # solid line. Drawn under the boxes so a click on it still hits the box.
+    boxes["cx"] = (boxes["x0"] + boxes["x1"]) / 2
+    boxes["cy"] = (boxes["y0"] + boxes["y1"]) / 2
+    crosses = (
+        alt.Chart(boxes[boxes["status"] == REMOVAL_STATUS[1]])
+        .mark_text(text="✕", fontSize=18, fontWeight="bold", color=MAP_FOCUS)
+        .encode(x=alt.X("cx:Q", scale=x_scale), y=alt.Y("cy:Q", scale=y_scale))
+    )
+
+    # Boxes on top: a click anywhere in one toggles that toolpath, which is a
+    # much bigger target than a 2px line.
+    return (
+        alt.layer(paths, crosses, targets)
+        .properties(width=width, height=height)
+        .properties(autosize=alt.AutoSizeParams(type="pad", contains="padding"))
+    )
+
+
 def build_toolpath_map(
     toolpaths,
     points: list[dict],
@@ -674,18 +811,9 @@ def build_toolpath_map(
         )
     boxes_df = pd.DataFrame(boxes)
 
-    # True-aspect plan view: one millimetre is the same number of pixels on
-    # both axes, so a square part looks square. `size` is the long edge in
-    # pixels; the short axis gets whatever that scale gives it. The caller must
-    # render this with use_container_width=False or Streamlit stretches the
-    # width to the container and the aspect goes with it.
-    x_lo, x_hi = boxes_df["x0"].min() - 3, boxes_df["x1"].max() + 3
-    y_lo, y_hi = boxes_df["y0"].min() - 3, boxes_df["y1"].max() + 3
-    span_x, span_y = max(x_hi - x_lo, 1e-6), max(y_hi - y_lo, 1e-6)
-    px_per_mm = size / max(span_x, span_y)
-    width, height = span_x * px_per_mm, span_y * px_per_mm
-    x_enc = alt.X("x:Q", title="X (mm)", scale=alt.Scale(domain=[x_lo, x_hi], zero=False, nice=False))
-    y_enc = alt.Y("y:Q", title="Y (mm)", scale=alt.Scale(domain=[y_lo, y_hi], zero=False, nice=False))
+    x_scale, y_scale, width, height = _plan_view(boxes_df, size)
+    x_enc = alt.X("x:Q", title="X (mm)", scale=x_scale)
+    y_enc = alt.Y("y:Q", title="Y (mm)", scale=y_scale)
 
     pick = alt.selection_point(name=MAP_SELECTION, fields=["key"], on="click")
     pick_section = alt.selection_point(name=MAP_SECTION_SELECTION, fields=["pkey"], on="click")
@@ -757,9 +885,9 @@ def build_toolpath_map(
         alt.Chart(boxes_df)
         .mark_rect(fill="#ffffff", fillOpacity=0.02, cornerRadius=4)
         .encode(
-            x=alt.X("x0:Q", scale=alt.Scale(domain=[x_lo, x_hi], zero=False, nice=False)),
+            x=alt.X("x0:Q", scale=x_scale),
             x2="x1:Q",
-            y=alt.Y("y0:Q", scale=alt.Scale(domain=[y_lo, y_hi], zero=False, nice=False)),
+            y=alt.Y("y0:Q", scale=y_scale),
             y2="y1:Q",
             stroke=alt.condition(pick, alt.value(ACCENT), alt.value("rgba(255,255,255,0.10)"), empty=False),
             strokeWidth=alt.condition(pick, alt.value(2), alt.value(1), empty=False),
@@ -1753,10 +1881,14 @@ if fix_index < len(selected_ids):
         # Section removal is opt-in per section (defaults to keeping everything),
         # unlike the other fixes which default to applying every proposed change.
         st.write(result.summary)
-        st.info("Nothing is removed unless you tick it. Tick a section to remove that whole block.")
+        st.info(
+            "Nothing is removed unless you tick it. Tick a section — or click it on the map — "
+            "to remove that whole block."
+        )
 
         accept_key_prefix = f"accept_{fix_id}_{fix_index}"
-        child_keys = [f"{accept_key_prefix}_{c.original_index}" for c in result.changes]
+        key_of_change = {c.original_index: f"{accept_key_prefix}_{c.original_index}" for c in result.changes}
+        child_keys = list(key_of_change.values())
         remove_all = st.checkbox(
             "Remove all sections",
             value=False,
@@ -1765,19 +1897,90 @@ if fix_index < len(selected_ids):
             args=(f"{accept_key_prefix}_all", child_keys),
         )
 
+        # Where each section sits on the bed: names like `..._COPY_35` don't
+        # say, and that's what decides whether it should go. Each section
+        # starts at its marker line, which is also where its toolpath starts.
+        section_toolpaths = [tp for tp in analyse_toolpaths(current_program) if tp.start_index in key_of_change]
+        removal_parts = group_into_parts(section_toolpaths)
+        part_of_section = {tp.start_index: pt for pt in removal_parts for tp in pt.toolpaths}
+        points = path_points(current_program, section_toolpaths)
+
+        if points:
+            col_map, col_list = st.columns([3, 2], gap="medium")
+            # A slot, filled after the checklist so the map shows this run's ticks.
+            map_slot = col_map.container()
+        else:
+            col_list = st.container()
+
         accepted_indices = set()
         n_lines_selected = 0
-        with st.container(height=440, border=True):
+        with col_list.container(height=520 if points else 440, border=True):
             for change in result.changes:
                 n_lines = (change.end_index - change.original_index + 1) if change.end_index is not None else 1
+                part = part_of_section.get(change.original_index)
+                where = f" · {part.name} ({part.where})" if part and part.bounds else ""
                 caption = (
-                    f"**{change.label}**  — lines {change.original_index + 1}-{change.end_index + 1}"
+                    f"**{change.label}**{where}  — lines {change.original_index + 1}-{change.end_index + 1}"
                     f" ({n_lines} lines)"
                 )
-                checked = st.checkbox(caption, value=remove_all, key=f"{accept_key_prefix}_{change.original_index}")
+                checked = st.checkbox(caption, value=remove_all, key=key_of_change[change.original_index])
                 if checked:
                     accepted_indices.add(change.original_index)
                     n_lines_selected += n_lines
+
+        if points:
+            # The chart's key carries a version that every click bumps, so the
+            # chart comes back with an empty selection. Otherwise clicking the
+            # same toolpath twice wouldn't change the selection, the callback
+            # wouldn't fire, and it could never be toggled back.
+            map_ver_key = f"{accept_key_prefix}_mapver"
+            map_key = f"{accept_key_prefix}_map_{st.session_state.get(map_ver_key, 0)}"
+
+            # Bound as defaults: the callback outlives this run.
+            def toggle_from_map(
+                map_key: str = map_key,
+                keys: dict = key_of_change,
+                master: str = f"{accept_key_prefix}_all",
+                map_ver_key: str = map_ver_key,
+            ) -> None:
+                ss = st.session_state
+                child = keys.get(toolpath_from_removal_selection(ss.get(map_key)))
+                if child is None:
+                    return
+                ss[child] = not ss.get(child, ss.get(master, False))
+                ss[map_ver_key] = ss.get(map_ver_key, 0) + 1
+
+            labels = {
+                c.original_index: {
+                    "Section": c.label or "",
+                    "Part": (
+                        f"{part_of_section[c.original_index].name} — {part_of_section[c.original_index].where}"
+                        if c.original_index in part_of_section else "—"
+                    ),
+                    "Lines": f"{c.original_index + 1}–{c.end_index + 1}",
+                }
+                for c in result.changes
+            }
+            chart = build_removal_map(
+                points, labels, accepted_indices, size=int(st.session_state.get(MAP_SIZE_KEY, 520))
+            )
+            with map_slot:
+                st.altair_chart(
+                    chart,
+                    key=map_key,
+                    on_select=toggle_from_map,
+                    selection_mode=[REMOVAL_SELECTION],
+                    width="content",
+                )
+                stacked = any(len(pt.toolpaths) > 1 for pt in removal_parts)
+                st.caption(
+                    "Click a toolpath to tick or untick it for removal. Red, dashed and marked ✕ = will be removed."
+                    + (
+                        " Some sections share a footprint (layers of one build), so only the top one "
+                        "can be clicked there — use the list for the rest."
+                        if stacked else ""
+                    )
+                )
 
         if accepted_indices:
             st.warning(
