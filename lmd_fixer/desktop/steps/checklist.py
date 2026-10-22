@@ -124,6 +124,9 @@ class ChecklistPanel(QWidget):
         )
         parts = part_of_change or {}
         self._filling = True
+        # Silent while refilling: clear() reports the selection as it removes
+        # rows, with positions that belong to the previous step's changes.
+        self.tree.blockSignals(True)
         self.tree.clear()
         for pos, change in enumerate(self.changes):
             where, what = describe(change)
@@ -132,6 +135,7 @@ class ChecklistPanel(QWidget):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setData(0, Qt.UserRole, pos)
             self.tree.addTopLevelItem(item)
+        self.tree.blockSignals(False)
         self._filling = False
         self.tree.setColumnHidden(3, not parts)
         self.refresh()
@@ -200,7 +204,8 @@ class ChecklistPanel(QWidget):
         return None if item is None else item.data(0, Qt.UserRole)
 
     def selected_positions(self) -> list[int]:
-        return sorted(item.data(0, Qt.UserRole) for item in self.tree.selectedItems())
+        return sorted(p for item in self.tree.selectedItems()
+                      if 0 <= (p := item.data(0, Qt.UserRole)) < len(self.changes))
 
     def select_positions(self, positions, emit: bool = False) -> None:
         """Selects rows chosen elsewhere (the map, the code view)."""

@@ -94,7 +94,11 @@ needed; it's in git history (`adjust_section_feeds.py`,
   ExtraSelections; a full-width band per line only for changes under
   `BAND_MAX_LINES`, since Qt draws full width only for an empty cursor and a
   section removal would need thousands. Confirmation prompts go through
-  `MainWindow.ask` / `confirm_restart` so tests can answer them.
+  `MainWindow.ask` / `confirm_restart` so tests can answer them. Step
+  panels block their tree's signals while refilling: `QTreeWidget.clear()`
+  removes rows from the end and reports the selection after each removal,
+  so rows from the previous step get reported against the new step's
+  change list (an `IndexError` in `_starts_for_positions`).
 - **Desktop bed map** (`desktop/bed_map.py`, `BedMapView`): a
   `QGraphicsScene` in mm with Y flipped up. Each toolpath has a cosmetic-pen
   path, a `_Box` click target and an `_Label`; labels ignore the view

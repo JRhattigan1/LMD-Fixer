@@ -123,6 +123,7 @@ class RecipesPanel(QWidget):
         self.calls = toolpath_recipe_calls(session.current)
         self.reload_database()
         parts = part_of_toolpath or {}
+        self.tree.blockSignals(True)  # see ChecklistPanel.load
         self.tree.clear()
         for call in self.calls:
             item = QTreeWidgetItem([call.name, parts.get(call.start_index, ""),
@@ -133,6 +134,7 @@ class RecipesPanel(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
                 item.setForeground(0, QColor(theme.DIM))
             self.tree.addTopLevelItem(item)
+        self.tree.blockSignals(False)
         self.refresh()
         for col in range(4):
             self.tree.resizeColumnToContents(col)

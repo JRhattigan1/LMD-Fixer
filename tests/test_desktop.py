@@ -280,3 +280,17 @@ def test_selecting_in_3d_selects_on_the_map_and_in_the_list(window, sample_file)
     # And the other way: the list drives the 3D selection.
     window.checklist.tree.setCurrentItem(window.checklist.tree.topLevelItem(0))
     assert window.view3d.selected() == [start_of(window, "PATH_A")]
+
+
+def test_moving_to_a_step_with_fewer_changes_keeps_the_selection_valid(window, sample_file):
+    """Regression: the rows selected at one step were reported against the
+    next step's (shorter) change list while the list was being refilled."""
+    window.open_file(str(sample_file))
+    tree = window.checklist.tree
+    # clear() removes rows from the end, reporting the selection after each
+    # removal, so row 5 was still "selected" against the 3-row next step.
+    tree.setCurrentItem(tree.topLevelItem(10))
+    tree.topLevelItem(5).setSelected(True)
+    window.apply_step()  # sections: only 3 rows
+    assert window.checklist.selected_positions() == [0]
+    assert window.map.selected() == [start_of(window, "PATH_A")]
