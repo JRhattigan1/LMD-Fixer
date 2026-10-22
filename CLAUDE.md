@@ -310,7 +310,7 @@ Things that look removable but aren't:
   Qt bindings are excluded so pyqtgraph can't pull them in.
 - The icon is drawn in code (`desktop/icon.py`). The build renders it to an
   `.ico` and passes it in via `LMD_FIXER_ICON`.
-- `--selftest [IN OUT] [--report FILE]` checks five things:
+- `--selftest [IN OUT] [--report FILE]` checks four things:
   - the window builds offscreen in every theme
   - the 3D and SpaceMouse modules load
   - the window opens IN, and the 3D view starts OpenGL and draws it
