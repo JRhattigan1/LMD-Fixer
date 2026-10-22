@@ -138,9 +138,12 @@ def group_into_parts(toolpaths: list[Toolpath], gap_mm: float = 0.0) -> list[Par
     return parts
 
 
-def _words(line: str) -> list[tuple[str, float]]:
+@functools.lru_cache(maxsize=65536)
+def _words(line: str) -> tuple[tuple[str, float], ...]:
+    # Cached per line text: a step removes or edits a few lines, so when the
+    # next program is parsed almost every line has been seen before.
     code = _COMMENT_RE.sub("", line).strip().lstrip("/").upper()
-    return [(letter, float(value)) for letter, value in _WORD_RE.findall(code)]
+    return tuple((letter, float(value)) for letter, value in _WORD_RE.findall(code))
 
 
 def _arc_length(start: tuple[float, float], end: tuple[float, float], clockwise: bool, words: dict) -> float:
@@ -255,7 +258,15 @@ def _toolpath_bounds(lines: list[str]) -> list[tuple[int, int, str]]:
 
 
 def analyse_toolpaths(program: GCodeProgram) -> list[Toolpath]:
-    """Every toolpath in the program, with its measured path and footprint."""
+    """Every toolpath in the program, with its measured path and footprint.
+    Cached per program text (the plan map and the 3D view both ask for it);
+    treat the result as read-only."""
+    return _analyse_cached(tuple(program.lines))
+
+
+@functools.lru_cache(maxsize=4)
+def _analyse_cached(lines: tuple[str, ...]) -> list[Toolpath]:
+    program = GCodeProgram(lines=list(lines))
     all_moves = _parse(program.lines)
     move_indices = [m.index for m in all_moves]
     toolpaths: list[Toolpath] = []

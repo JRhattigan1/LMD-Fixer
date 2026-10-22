@@ -127,11 +127,13 @@ def _selftest(args: list[str]) -> int:
         # bundle PyOpenGL's platform support for this to work.
         window.show()
         window.map_tabs.setCurrentWidget(window.view3d)
-        QApplication.processEvents()
-        if window.view3d.gl is None or not window.view3d._items:
+        for _ in range(3):  # the GL view is created on a timer after the tab shows
+            QApplication.processEvents()
+        window.view3d.gl.grabFramebuffer()  # a real frame: shaders compile and buffers upload
+        if not window.view3d.drawn_toolpaths():
             say("FAIL the 3D view didn't draw")
             return finish(1)
-        say(f"ok   3D view draws {len(window.view3d._items)} toolpaths")
+        say(f"ok   3D view draws {window.view3d.drawn_toolpaths()} toolpaths")
         # Through the same state machine the window drives, applying each
         # step with its fix's defaults.
         session = ReviewSession(GCodeProgram.from_file(source), FIX_ORDER)

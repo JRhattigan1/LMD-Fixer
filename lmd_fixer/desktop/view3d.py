@@ -7,6 +7,23 @@ Ctrl-click adds or removes it, double-click toggles it like on the plan map.
 It takes the same `ToolpathStyle`s and selection as the plan map, so it
 always shows the same state.
 
+Built to stay cheap however much is on the bed:
+
+- **A handful of GL items, whatever the toolpath count.** Every deposition
+  path is in one line item with per-vertex colours; an "emphasis" item
+  redraws the selected and changed toolpaths wider; travel, the selection
+  box and the grid are one item each; all labels are drawn by one item in a
+  single QPainter pass. Restyling or selecting only recolours arrays and
+  updates those items in place — nothing is created or destroyed.
+- **Nothing happens while hidden.** Loads, styles and selections are stored
+  and applied when the 3D tab is next shown.
+- **It survives a new GL context.** pyqtgraph caches compiled shaders and
+  vertex buffers per process, not per context, so when Qt recreates the
+  context (e.g. the window moving to another screen) every draw failed with
+  "invalid value", every frame, and printing those errors froze the app.
+  `_GLView.initializeGL` clears pyqtgraph's shader cache and the items are
+  rebuilt for the new context.
+
 Picking is done in screen space: every deposition segment is projected with
 the camera's own matrices and the nearest one within a few pixels wins,
 the one nearest the camera among near-ties, so the top layer of a stack is
@@ -17,8 +34,8 @@ shown, so nothing touches OpenGL until someone looks at it.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QMatrix4x4, QVector3D
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QMatrix4x4, QPainter, QVector3D
 from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from lmd_fixer.desktop import theme
@@ -34,6 +51,8 @@ SPACE_ZOOM = 0.035
 CLICK_SLOP_PX = 4  # movement below this between press and release is a click
 PICK_TOL_PX = 8
 Z_SCALES = [1, 2, 5, 10]
+BASE_WIDTH = 1.5
+EMPHASIS_WIDTH = 3.0
 
 
 def rgba(colour: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
@@ -84,6 +103,41 @@ def pick_segment(segments: np.ndarray, owners: np.ndarray, mvp: np.ndarray, widt
     return int(owners[near[np.argmin(seg_depth)]])
 
 
+def preload() -> None:
+    """Imports pyqtgraph's OpenGL support on a background thread, so it's
+    ready before anyone opens the 3D tab (importing it takes 1-3 s, which
+    used to freeze the window the first time 3D was shown). Pure imports
+    only — no Qt objects are created here. If the tab is opened first, the
+    import lock simply makes it wait for this to finish."""
+    import threading
+
+    def load() -> None:
+        try:
+            import pyqtgraph.opengl  # noqa: F401
+        except Exception:  # the tab will report it properly when opened
+            pass
+
+    threading.Thread(target=load, name="preload-3d", daemon=True).start()
+
+
+def reset_pyqtgraph_gl_cache() -> None:
+    """Forgets pyqtgraph's compiled shaders, which belong to whichever GL
+    context compiled them; the next draw compiles them for the current one.
+    They're cached in two places: the shared ShaderProgram table, and a
+    `_shaderProgram` class attribute on item classes such as GLLinePlotItem."""
+    import pyqtgraph.opengl as gl
+    from pyqtgraph.opengl import shaders
+
+    for program in shaders.ShaderProgram.names.values():
+        program.prog = None
+        for shader in program.shaders:
+            shader.compiled = None
+    for name in dir(gl):
+        cls = getattr(gl, name)
+        if isinstance(cls, type) and "_shaderProgram" in vars(cls):
+            cls._shaderProgram = None
+
+
 class View3D(QWidget):
     selectionEdited = Signal(list)
     toolpathActivated = Signal(int)
@@ -97,7 +151,7 @@ class View3D(QWidget):
         self.z_scale = QComboBox()
         self.z_scale.addItems([f"Z ×{k}" for k in Z_SCALES])
         self.z_scale.setToolTip("Stretch heights, to pull stacked layers apart")
-        self.z_scale.currentIndexChanged.connect(lambda _: self._rebuild())
+        self.z_scale.currentIndexChanged.connect(self._z_changed)
         fit = QPushButton("Fit")
         fit.setProperty("flat", True)
         fit.clicked.connect(self.fit)
@@ -112,20 +166,27 @@ class View3D(QWidget):
         self.layout_ = QVBoxLayout(self)
         self.layout_.setContentsMargins(0, 0, 0, 0)
         self.layout_.addLayout(bar)
-        self.placeholder = QLabel("")
+        self.placeholder = QLabel("Loading the 3D view…")
+        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setProperty("role", "dim")
         self.layout_.addWidget(self.placeholder, 1)
 
         self.gl = None  # created on first show
+        # The program's geometry, as loaded (Z unscaled).
         self.deposition: dict[int, np.ndarray] = {}  # toolpath start -> (n, 2, 3) segments
-        self.travel = np.zeros((0, 2, 3))
+        self.travel = np.zeros((0, 2, 3), dtype=np.float32)
         self.boxes: dict[int, tuple[np.ndarray, np.ndarray]] = {}  # start -> (min xyz, max xyz)
         self.styles: dict[int, ToolpathStyle] = {}
         self._selected: set[int] = set()
-        self._items: dict[int, object] = {}
-        self._labels: list = []
-        self._static: list = []
-        self._selection_item = None
-        self._travel_item = None
+        # Flattened for drawing and picking (rebuilt on load / Z change).
+        self._order: list[int] = []
+        self._vertex_range: dict[int, tuple[int, int]] = {}
+        self._pos = np.zeros((0, 3), dtype=np.float32)
+        self._owners = np.zeros(0, dtype=np.int64)  # per segment
+        # GL items (created once per context).
+        self._base = self._emphasis = self._travel_item = self._selection_item = None
+        self._labels = self._grid = None
+        self._dirty = {"geometry", "style", "selection"}
         self._needs_fit = True
 
     # -- data ----------------------------------------------------------------------
@@ -139,25 +200,48 @@ class View3D(QWidget):
             segs = [(m.start_xyz, m.end_xyz) for m in tp.moves if m.start_xyz and m.end_xyz]
             measured.update(m.index for m in tp.moves)
             if segs:
-                arr = np.array(segs, dtype=float)
+                arr = np.asarray(segs, dtype=np.float32)
                 self.deposition[tp.start_index] = arr
                 pts = arr.reshape(-1, 3)
                 self.boxes[tp.start_index] = (pts.min(axis=0), pts.max(axis=0))
         travel = [(m.start_xyz, m.end_xyz) for m in program_moves(program)
                   if m.index not in measured and m.start_xyz and m.end_xyz and m.start_xyz != m.end_xyz]
-        self.travel = np.array(travel, dtype=float) if travel else np.zeros((0, 2, 3))
+        self.travel = np.asarray(travel, dtype=np.float32) if travel else np.zeros((0, 2, 3), dtype=np.float32)
         self._selected &= set(self.deposition)
         self._needs_fit = True
-        self._rebuild()
+        self._flatten()
+        self._dirty |= {"geometry", "style", "selection"}
+        self._sync()
+
+    def _flatten(self) -> None:
+        """Every deposition segment in one (scaled) array, with each toolpath's
+        vertex range, for drawing and picking."""
+        self._order = list(self.deposition)
+        k = self._zk()
+        chunks, owners, start = [], [], 0
+        self._vertex_range.clear()
+        for s in self._order:
+            segs = self.deposition[s]
+            n = len(segs) * 2
+            self._vertex_range[s] = (start, start + n)
+            start += n
+            chunks.append(segs.reshape(-1, 3))
+            owners.append(np.full(len(segs), s, dtype=np.int64))
+        self._pos = np.concatenate(chunks).astype(np.float32) if chunks else np.zeros((0, 3), dtype=np.float32)
+        if k != 1:
+            self._pos[:, 2] *= k
+        self._owners = np.concatenate(owners) if owners else np.zeros(0, dtype=np.int64)
+
+    def drawn_toolpaths(self) -> int:
+        """How many toolpaths are on screen (0 until the GL view exists and
+        has its geometry)."""
+        if self.gl is None or self._base is None or self._base.pos is None or not len(self._base.pos):
+            return 0
+        return len(self._order)
 
     def segments_and_owners(self) -> tuple[np.ndarray, np.ndarray]:
         """Every deposition segment (scaled as drawn) and its toolpath."""
-        if not self.deposition:
-            return np.zeros((0, 2, 3)), np.zeros(0, dtype=int)
-        starts = list(self.deposition)
-        segs = np.concatenate([self._scaled(self.deposition[s]) for s in starts])
-        owners = np.concatenate([np.full(len(self.deposition[s]), s) for s in starts])
-        return segs, owners
+        return self._pos.reshape(-1, 2, 3), self._owners
 
     def _zk(self) -> float:
         return float(Z_SCALES[max(0, self.z_scale.currentIndex())])
@@ -166,7 +250,7 @@ class View3D(QWidget):
         k = self._zk()
         if k == 1:
             return arr
-        out = arr.copy()
+        out = np.array(arr, dtype=np.float32, copy=True)
         out[..., 2] *= k
         return out
 
@@ -174,28 +258,49 @@ class View3D(QWidget):
 
     def set_styles(self, styles: dict[int, ToolpathStyle], tooltips: dict[int, str] | None = None) -> None:
         self.styles = dict(styles)
-        self._restyle()
+        self._dirty.add("style")
+        self._sync()
 
     def selected(self) -> list[int]:
         return sorted(self._selected)
 
     def set_selected(self, starts) -> None:
-        self._selected = set(starts) & set(self.deposition)
-        self._draw_selection()
+        wanted = set(starts) & set(self.deposition)
+        if wanted != self._selected:
+            self._selected = wanted
+            self._dirty |= {"selection", "style"}  # selected paths are drawn wider
+            self._sync()
 
     # -- GL -------------------------------------------------------------------------
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self.gl is None:
-            self._create_gl()
+            # Let the placeholder paint before the (slow, first-time) import.
+            QTimer.singleShot(0, self._create_gl)
+        else:
+            self._sync()
 
     def _create_gl(self) -> None:
+        if self.gl is not None:
+            return
         import pyqtgraph.opengl as gl
+
+        view3d = self
 
         class _GLView(gl.GLViewWidget):
             clicked = Signal(QPointF, bool)
             doubleClicked = Signal(QPointF)
+
+            def initializeGL(self):
+                # A new context: shaders and buffers from any earlier one are
+                # invalid here (see the module docstring).
+                reset_pyqtgraph_gl_cache()
+                super().initializeGL()
+                if view3d._base is not None:
+                    # Items from the old context hold buffers that mean
+                    # nothing in this one: replace them before anything draws.
+                    view3d._recreate_items()
 
             def mousePressEvent(self, ev):
                 self._press = ev.position()
@@ -219,83 +324,100 @@ class View3D(QWidget):
         self.gl.doubleClicked.connect(self._double_clicked)
         self.layout_.replaceWidget(self.placeholder, self.gl)
         self.placeholder.deleteLater()
-        self._rebuild()
+        self._create_items()
+        self._dirty |= {"geometry", "style", "selection"}
+        self._sync()
 
-    def _rebuild(self) -> None:
-        """Recreates every GL item from the data (after a load or Z change)."""
-        if self.gl is None:
-            return
+    def _create_items(self) -> None:
         import pyqtgraph.opengl as gl
 
-        for item in [*self._items.values(), *self._labels, *self._static,
-                     self._selection_item, self._travel_item]:
-            if item is not None:
-                self.gl.removeItem(item)
-        self._items.clear()
-        self._labels.clear()
-        self._static.clear()
-        self._selection_item = self._travel_item = None
-        if not self.deposition and not len(self.travel):
-            return
-
-        lo = np.min([b[0] for b in self.boxes.values()], axis=0) if self.boxes else np.zeros(3)
-        hi = np.max([b[1] for b in self.boxes.values()], axis=0) if self.boxes else np.ones(3)
-        g = QColor(theme.TEXT)
-        grid = gl.GLGridItem(color=(g.red(), g.green(), g.blue(), 26))
-        size = max(hi[0] - lo[0], hi[1] - lo[1]) + 40
-        grid.setSize(size, size, 1)
-        grid.setSpacing(10, 10, 1)
-        grid.translate((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, 0)
-        self.gl.addItem(grid)
-        self._static.append(grid)
-
-        self._travel_item = gl.GLLinePlotItem(
-            pos=self._scaled(self.travel).reshape(-1, 3) if len(self.travel) else np.zeros((0, 3)),
-            color=rgba(theme.TRAVEL, 0.4), width=1, mode="lines", antialias=True)
-        self._travel_item.setVisible(self.show_travel.isChecked())
-        self.gl.addItem(self._travel_item)
-        for start, segs in self.deposition.items():
-            item = gl.GLLinePlotItem(pos=self._scaled(segs).reshape(-1, 3), mode="lines", antialias=True)
+        self._grid = gl.GLGridItem()
+        self._travel_item = gl.GLLinePlotItem(mode="lines", width=1, antialias=True)
+        self._base = gl.GLLinePlotItem(mode="lines", width=BASE_WIDTH, antialias=True)
+        self._emphasis = gl.GLLinePlotItem(mode="lines", width=EMPHASIS_WIDTH, antialias=True)
+        self._selection_item = gl.GLLinePlotItem(mode="lines", width=1.5, antialias=True)
+        self._labels = _LabelLayer()
+        self._labels.setDepthValue(10)  # drawn last, over everything
+        for item in (self._grid, self._travel_item, self._base, self._emphasis, self._selection_item,
+                     self._labels):
             self.gl.addItem(item)
-            self._items[start] = item
-        self._restyle()
+
+    def _recreate_items(self) -> None:
+        """After a context change: drop the old items' (now invalid) buffers."""
+        if self.gl is None:
+            return
+        for item in (self._grid, self._travel_item, self._base, self._emphasis, self._selection_item,
+                     self._labels):
+            if item is not None and item in self.gl.items:
+                self.gl.removeItem(item)
+        self._create_items()
+        self._dirty |= {"geometry", "style", "selection"}
+        self._sync()
+
+    def _sync(self) -> None:
+        """Applies whatever changed since the last time the view was shown."""
+        # _base is None between the GL view being placed (which re-shows this
+        # widget) and its items being created.
+        if self.gl is None or self._base is None or not self.isVisible() or not self._dirty:
+            return
+        dirty, self._dirty = self._dirty, set()
+        if "geometry" in dirty:
+            self._apply_geometry()
+        if "style" in dirty:
+            self._apply_style()
+        if "selection" in dirty:
+            self._apply_selection()
         if self._needs_fit:
             self.fit()
 
-    def _restyle(self) -> None:
-        if self.gl is None:
-            return
-        import pyqtgraph.opengl as gl
+    def _empty(self) -> np.ndarray:
+        return np.zeros((0, 3), dtype=np.float32)
 
-        for label in self._labels:
-            self.gl.removeItem(label)
-        self._labels.clear()
-        default = ToolpathStyle()
-        font = QFont()
-        font.setPointSizeF(9)
-        for start, item in self._items.items():
-            style = self.styles.get(start, default)
-            width = style.width + (1.5 if start in self._selected else 0)
-            item.setData(color=rgba(style.colour or theme.NEUTRAL), width=width)
-            if style.label:
-                lo, hi = self.boxes[start]
-                pos = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, hi[2] * self._zk() + 2])
-                bold = QFont(font)
-                bold.setBold(style.label_bold)
-                label = gl.GLTextItem(pos=pos, text=style.label, font=bold,
-                                      color=QColor(theme.FOCUS if style.label_bold else theme.TEXT))
-                self.gl.addItem(label)
-                self._labels.append(label)
-        self._draw_selection()
+    def _apply_geometry(self) -> None:
+        travel = self._scaled(self.travel).reshape(-1, 3) if len(self.travel) else self._empty()
+        self._travel_item.setData(pos=travel, color=rgba(theme.TRAVEL, 0.4))
+        self._travel_item.setVisible(self.show_travel.isChecked() and len(travel) > 0)
+        self._base.setData(pos=self._pos if len(self._pos) else self._empty())
+        self._grid.resetTransform()
+        if self.boxes:
+            lo = np.min([b[0] for b in self.boxes.values()], axis=0)
+            hi = np.max([b[1] for b in self.boxes.values()], axis=0)
+            size = float(max(hi[0] - lo[0], hi[1] - lo[1]) + 40)
+            self._grid.setSize(size, size, 1)
+            self._grid.setSpacing(10, 10, 1)
+            self._grid.translate(float(lo[0] + hi[0]) / 2, float(lo[1] + hi[1]) / 2, 0)
+        g = QColor(theme.TEXT)
+        self._grid.setColor((g.red(), g.green(), g.blue(), 26))
 
-    def _draw_selection(self) -> None:
-        if self.gl is None:
-            return
-        import pyqtgraph.opengl as gl
+    def _apply_style(self) -> None:
+        """Recolours the one deposition item and refills the emphasis item and
+        labels — arrays only, no GL objects created."""
+        default = rgba(theme.NEUTRAL)
+        colours = np.empty((len(self._pos), 4), dtype=np.float32)
+        emph_pos, emph_col, labels = [], [], []
+        k = self._zk()
+        for s in self._order:
+            a, b = self._vertex_range[s]
+            style = self.styles.get(s)
+            colour = rgba(style.colour) if style and style.colour else default
+            colours[a:b] = colour
+            if (style and style.width > BASE_WIDTH) or s in self._selected:
+                emph_pos.append(self._pos[a:b])
+                emph_col.append(colours[a:b])
+            if style and style.label:
+                lo, hi = self.boxes[s]
+                labels.append(((float(lo[0] + hi[0]) / 2, float(lo[1] + hi[1]) / 2, float(hi[2] * k + 2)),
+                               style.label, style.label_bold))
+        if len(colours):
+            self._base.setData(color=colours)
+        if emph_pos:
+            self._emphasis.setData(pos=np.concatenate(emph_pos), color=np.concatenate(emph_col))
+            self._emphasis.setVisible(True)
+        else:
+            self._emphasis.setVisible(False)
+        self._labels.set_labels(labels)
 
-        if self._selection_item is not None:
-            self.gl.removeItem(self._selection_item)
-            self._selection_item = None
+    def _apply_selection(self) -> None:
         edges = []
         k = self._zk()
         for start in self._selected:
@@ -309,19 +431,16 @@ class View3D(QWidget):
                 for a, b in ((i, (i + 1) % 4), (i + 4, (i + 1) % 4 + 4), (i, i + 4)):
                     edges += [corners[a], corners[b]]
         if edges:
-            self._selection_item = gl.GLLinePlotItem(pos=np.array(edges), color=rgba(theme.FOCUS, 0.9),
-                                                     width=1.5, mode="lines", antialias=True)
-            self.gl.addItem(self._selection_item)
-        # Selected toolpaths are also drawn thicker.
-        default = ToolpathStyle()
-        for start, item in self._items.items():
-            style = self.styles.get(start, default)
-            item.setData(width=style.width + (1.5 if start in self._selected else 0))
+            self._selection_item.setData(pos=np.asarray(edges, dtype=np.float32), color=rgba(theme.FOCUS, 0.9))
+            self._selection_item.setVisible(True)
+        else:
+            self._selection_item.setVisible(False)
 
     def refresh_theme(self) -> None:
         if self.gl is not None:
             self.gl.setBackgroundColor(QColor(theme.CANVAS))
-            self._rebuild()
+        self._dirty |= {"geometry", "style", "selection"}
+        self._sync()
 
     def fit(self) -> None:
         if self.gl is None or not self.boxes:
@@ -333,6 +452,11 @@ class View3D(QWidget):
         extent = float(max(hi[0] - lo[0], hi[1] - lo[1], (hi[2] - lo[2]) * k, 10))
         self.gl.setCameraPosition(pos=centre, distance=extent * 1.25, elevation=35, azimuth=-70)
         self._needs_fit = False
+
+    def _z_changed(self, _index: int) -> None:
+        self._flatten()
+        self._dirty |= {"geometry", "style", "selection"}
+        self._sync()
 
     def apply_motion(self, m) -> None:
         """Moves the camera from a SpaceMouse `Motion`: twist turns the bed,
@@ -350,7 +474,7 @@ class View3D(QWidget):
 
     def _travel_toggled(self, on: bool) -> None:
         if self._travel_item is not None:
-            self._travel_item.setVisible(on)
+            self._travel_item.setVisible(on and len(self.travel) > 0)
 
     # -- picking -----------------------------------------------------------------------
 
@@ -368,13 +492,87 @@ class View3D(QWidget):
         if additive:
             if start is None:
                 return
-            self._selected ^= {start}
+            selection = self._selected ^ {start}
         else:
-            self._selected = {start} if start is not None else set()
-        self._draw_selection()
+            selection = {start} if start is not None else set()
+        self.set_selected(selection)
         self.selectionEdited.emit(self.selected())
 
     def _double_clicked(self, pos: QPointF) -> None:
         start = self.pick(pos)
         if start is not None:
             self.toolpathActivated.emit(start)
+
+
+def _label_layer_base():
+    import pyqtgraph.opengl as gl
+
+    return gl.GLGraphicsItem.GLGraphicsItem
+
+
+class _LabelLayer:
+    """Placeholder replaced on first use by the real GL item class (pyqtgraph
+    is imported lazily, so the class can't be defined at import time)."""
+
+    def __new__(cls, *args, **kwargs):
+        return _make_label_layer_class()(*args, **kwargs)
+
+
+_LABEL_LAYER_CLASS = None
+
+
+def _make_label_layer_class():
+    global _LABEL_LAYER_CLASS
+    if _LABEL_LAYER_CLASS is not None:
+        return _LABEL_LAYER_CLASS
+    base = _label_layer_base()
+
+    class LabelLayer(base):
+        """Every label in one QPainter pass, each on a pill so it reads over
+        the paths. (pyqtgraph's GLTextItem opens a QPainter per label per
+        frame, which is what made restyling and orbiting slow.)"""
+
+        def __init__(self):
+            super().__init__()
+            self._points = np.zeros((0, 3))
+            self._text: list[tuple[str, bool]] = []
+
+        def set_labels(self, labels) -> None:
+            self._points = np.asarray([p for p, _, _ in labels], dtype=float).reshape(-1, 3)
+            self._text = [(t, b) for _, t, b in labels]
+            self.update()
+
+        def paint(self):
+            view = self.view()
+            if view is None or not self._text:
+                return
+            w, h = view.width(), view.height()
+            vp = (0, 0, w, h)
+            mvp = matrix_to_array(view.projectionMatrix(vp, vp) * view.viewMatrix())
+            xy, _, front = project(self._points, mvp, w, h)
+            painter = QPainter(view)
+            painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+            fonts = {}
+            for bold in (False, True):
+                f = QFont()
+                f.setPointSizeF(8.5)
+                f.setBold(bold)
+                fonts[bold] = (f, QFontMetricsF(f))
+            pill = QColor(theme.CANVAS)
+            pill.setAlpha(215)
+            for (x, y), ok, (text, bold) in zip(xy, front, self._text):
+                if not ok or not (-50 < x < w + 50 and -20 < y < h + 20):
+                    continue
+                font, metrics = fonts[bold]
+                tw, th = metrics.horizontalAdvance(text) + 8, metrics.height() + 2
+                rect = QRectF(x - tw / 2, y - th / 2, tw, th)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(pill)
+                painter.drawRoundedRect(rect, 4, 4)
+                painter.setFont(font)
+                painter.setPen(QColor(theme.FOCUS if bold else theme.TEXT))
+                painter.drawText(rect, Qt.AlignCenter, text)
+            painter.end()
+
+    _LABEL_LAYER_CLASS = LabelLayer
+    return LabelLayer

@@ -34,22 +34,30 @@ class GCodeHighlighter(QSyntaxHighlighter):
     """G/M codes, feeds, recipe numbers, comments and section markers, in
     the current theme's code colours (`reload` after a theme change)."""
 
-    PATTERNS = [
-        (re.compile(r"\bG\d+(?:\.\d+)?", re.I), "SYN_G", False),
-        (re.compile(r"\bM\d+", re.I), "SYN_M", False),
-        (re.compile(r"\bF[-+]?(?:\d+\.?\d*|\.\d+)", re.I), "SYN_F", False),
-        (re.compile(r"\bP\d+", re.I), "SYN_P", False),
-        (re.compile(r"\bO\d+", re.I), "SYN_O", True),
-    ]
-    COMMENT_RE = re.compile(r"\([^)]*\)")
+    # One pass per line: a combined pattern whose named group says which
+    # colour applies. Comments come first, so codes inside them aren't
+    # coloured. (Six separate passes made highlighting the bulk of every
+    # step change on a 10,000-line program.)
+    TOKENS = re.compile(
+        r"(?P<COMMENT>\([^)]*\))"
+        r"|(?P<SYN_G>\bG\d+(?:\.\d+)?)"
+        r"|(?P<SYN_M>\bM\d+)"
+        r"|(?P<SYN_F>\bF[-+]?(?:\d+\.?\d*|\.\d+))"
+        r"|(?P<SYN_P>\bP\d+)"
+        r"|(?P<SYN_O>\bO\d+)",
+        re.I,
+    )
 
     def __init__(self, document) -> None:
         super().__init__(document)
         self.reload()
 
     def reload(self) -> None:
-        self.RULES = [(rx, _fmt(getattr(theme, token), bold=bold)) for rx, token, bold in self.PATTERNS]
-        self.COMMENT = (self.COMMENT_RE, _fmt(theme.SYN_COMMENT, italic=True))
+        self.formats = {
+            "SYN_G": _fmt(theme.SYN_G), "SYN_M": _fmt(theme.SYN_M), "SYN_F": _fmt(theme.SYN_F),
+            "SYN_P": _fmt(theme.SYN_P), "SYN_O": _fmt(theme.SYN_O, bold=True),
+            "COMMENT": _fmt(theme.SYN_COMMENT, italic=True),
+        }
         self.MARKER = _fmt(theme.SYN_MARKER, bold=True)
         self.SKIP = _fmt(theme.FAINT)
         self.rehighlight()
@@ -58,12 +66,9 @@ class GCodeHighlighter(QSyntaxHighlighter):
         if SECTION_MARKER_RE.match(text.strip()):
             self.setFormat(0, len(text), self.MARKER)
             return
-        for pattern, fmt in self.RULES:
-            for m in pattern.finditer(text):
-                self.setFormat(m.start(), m.end() - m.start(), fmt)
-        pattern, fmt = self.COMMENT
-        for m in pattern.finditer(text):
-            self.setFormat(m.start(), m.end() - m.start(), fmt)
+        formats = self.formats
+        for m in self.TOKENS.finditer(text):
+            self.setFormat(m.start(), m.end() - m.start(), formats[m.lastgroup])
         if text.lstrip().startswith("/"):
             i = text.index("/")
             self.setFormat(i, 1, self.SKIP)
@@ -98,12 +103,15 @@ class GCodeView(QPlainTextEdit):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setReadOnly(True)
+        # Read-only, so undo history is pure cost (a third of every load).
+        self.setUndoRedoEnabled(False)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.setFont(theme.code_font())
         self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.highlighter = GCodeHighlighter(self.document())
         self._gutter = _Gutter(self)
         self._changes: list[LineChange] = []
+        self._cursors: list = []  # per change, see _change_cursors
         self._accepted: Callable[[int], bool] = lambda i: True
         self._change_at_line: dict[int, int] = {}
         self._current: int | None = None
@@ -117,22 +125,37 @@ class GCodeView(QPlainTextEdit):
 
     def set_lines(self, lines: list[str]) -> None:
         self._changes = []
+        self._cursors = []
         self._change_at_line = {}
         self._current = None
-        self.setPlainText("\n".join(lines))
-        self.setExtraSelections([])
+        # The view's own signals are silenced while the text goes in: each
+        # load would otherwise fire cursor-moved and line-count updates that
+        # ripple into the map and gutter. (Highlighting runs off the
+        # document's signals, so it's unaffected.)
+        self.blockSignals(True)
+        try:
+            self.setPlainText("\n".join(lines))
+            self.setExtraSelections([])
+        finally:
+            self.blockSignals(False)
+        self._update_gutter_width()
+        self._gutter.update()
 
     def show_changes(self, changes: list[LineChange], is_accepted: Callable[[int], bool],
                      current: int | None = None) -> None:
         """Marks `changes` (indexed by position) on the lines they touch;
         `current` is the position of the one selected in the step panel."""
-        self._changes = changes
+        if changes is not self._changes:
+            # A new step's changes: work out where each one sits once. Ticks
+            # and selection moves then only recolour these.
+            self._changes = changes
+            self._change_at_line = {}
+            for pos, c in enumerate(changes):
+                for line in range(c.original_index, c.end_index + 1):
+                    self._change_at_line.setdefault(line, pos)
+            self._cursors = self._change_cursors(changes)
         self._accepted = is_accepted
         self._current = current
-        self._change_at_line = {}
-        for pos, c in enumerate(changes):
-            for line in range(c.original_index, c.end_index + 1):
-                self._change_at_line.setdefault(line, pos)
         self._refresh_selections()
         self._gutter.update()
 
@@ -142,50 +165,69 @@ class GCodeView(QPlainTextEdit):
         if scroll and pos is not None and pos < len(self._changes):
             self.go_to_line(self._changes[pos].original_index)
 
+    def _change_cursors(self, changes: list[LineChange]) -> list[tuple[QTextCursor, list[QTextCursor]] | None]:
+        """Per change: a cursor over its text, and one empty cursor per line
+        for a full-width band. Qt only draws a full-width selection for an
+        empty cursor, hence one per line; a long range (a whole section,
+        hundreds of lines) gets no bands, since its text selection already
+        fills those lines and thousands of bands slow every repaint."""
+        doc = self.document()
+        out = []
+        for c in changes:
+            first = doc.findBlockByNumber(c.original_index)
+            if not first.isValid():
+                out.append(None)
+                continue
+            last = doc.findBlockByNumber(min(c.end_index, doc.blockCount() - 1))
+            text = QTextCursor(first)
+            text.setPosition(last.position() + max(0, last.length() - 1), QTextCursor.KeepAnchor)
+            bands = []
+            if c.end_index - c.original_index < BAND_MAX_LINES:
+                block = first
+                while block.isValid() and block.blockNumber() <= c.end_index:
+                    bands.append(QTextCursor(block))
+                    block = block.next()
+            out.append((text, bands))
+        return out
+
     def _refresh_selections(self) -> None:
         selections = []
-        doc = self.document()
-        for pos, c in enumerate(self._changes):
-            accepted = self._accepted(c.original_index)
-            fmt = QTextCharFormat()
-            if not accepted:
-                fmt.setBackground(theme.REJECTED_BG)
-            elif c.kind == "removed":
-                fmt.setBackground(theme.REMOVE_BG)
-                fmt.setFontStrikeOut(True)
-            else:
-                fmt.setBackground(theme.MODIFY_BG)
-            if pos == self._current:
-                bg = fmt.background().color()
-                bg.setAlpha(min(255, bg.alpha() + 70))
-                fmt.setBackground(bg)
-            first = doc.findBlockByNumber(c.original_index)
-            last = doc.findBlockByNumber(min(c.end_index, doc.blockCount() - 1))
-            if not first.isValid():
+        formats: dict[tuple, tuple[QTextCharFormat, QTextCharFormat]] = {}
+        for pos, (c, cursors) in enumerate(zip(self._changes, self._cursors)):
+            if cursors is None:
                 continue
+            key = (self._accepted(c.original_index), c.kind == "removed", pos == self._current)
+            if key not in formats:
+                accepted, removed, current = key
+                fmt = QTextCharFormat()
+                if not accepted:
+                    bg = QColor(theme.REJECTED_BG)
+                elif removed:
+                    bg = QColor(theme.REMOVE_BG)
+                    fmt.setFontStrikeOut(True)
+                else:
+                    bg = QColor(theme.MODIFY_BG)
+                if current:
+                    bg.setAlpha(min(255, bg.alpha() + 70))
+                fmt.setBackground(bg)
+                band = QTextCharFormat()
+                band.setBackground(bg)
+                band.setProperty(QTextFormat.FullWidthSelection, True)
+                formats[key] = (fmt, band)
+            fmt, band_fmt = formats[key]
+            text, bands = cursors
             # The text itself (struck through when it's being removed)...
             sel = QTextEdit.ExtraSelection()
             sel.format = fmt
-            cursor = QTextCursor(first)
-            cursor.setPosition(last.position() + max(0, last.length() - 1), QTextCursor.KeepAnchor)
-            sel.cursor = cursor
+            sel.cursor = text
             selections.append(sel)
             # ...and a full-width band per line, so a short line still reads
-            # as marked. Qt only draws a full-width selection for an empty
-            # cursor, hence one per line; a long range (a whole section,
-            # hundreds of lines) skips it, since the text selection already
-            # fills those lines and thousands of bands slow every repaint.
-            if c.end_index - c.original_index < BAND_MAX_LINES:
-                band_fmt = QTextCharFormat()
-                band_fmt.setBackground(fmt.background())
-                band_fmt.setProperty(QTextFormat.FullWidthSelection, True)
-                block = first
-                while block.isValid() and block.blockNumber() <= c.end_index:
-                    band = QTextEdit.ExtraSelection()
-                    band.format = band_fmt
-                    band.cursor = QTextCursor(block)
-                    selections.append(band)
-                    block = block.next()
+            # as marked.
+            for cursor in bands:
+                band = QTextEdit.ExtraSelection()
+                band.format = band_fmt
+                band.cursor = cursor
+                selections.append(band)
         self.setExtraSelections(selections)
 
     def refresh_theme(self) -> None:

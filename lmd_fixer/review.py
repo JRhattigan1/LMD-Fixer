@@ -90,7 +90,14 @@ class ReviewSession:
 
     @property
     def fix(self) -> Fix | None:
-        return None if self.finished else self._classes[self.fix_id]()
+        # Cached per step: the UI asks for it thousands of times per edit
+        # (is_accepted is called for every change on every redraw).
+        if self.finished:
+            return None
+        cached = getattr(self, "_fix_cache", None)
+        if cached is None or cached[0] != self.fix_id:
+            cached = self._fix_cache = (self.fix_id, self._classes[self.fix_id]())
+        return cached[1]
 
     def fix_label(self, fix_id: str) -> str:
         return self._classes[fix_id].label or fix_id

@@ -61,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     window = MainWindow()
     window.show()
     window.start_spacemouse()
+    from lmd_fixer.desktop.view3d import preload
+
+    preload()
     files = [a for a in argv[1:] if not a.startswith("-")]
     if files:
         window.open_file(files[0])
