@@ -7,21 +7,22 @@ name = "lmd-fixer"
 dynamic = ["version"]
 description = "Reviewable clean-up of laser metal deposition (LMD) G-code/PTP programs"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "streamlit>=1.36",
+    "PySide6-Essentials>=6.7",
+    "pyqtgraph>=0.13",  # the 3D view
+    "PyOpenGL",
+    "numpy",
+    "pandas",  # the material database
+    "hidapi",  # SpaceMouse input
 ]
 
 [project.optional-dependencies]
-# The desktop app (in progress; replaces the Streamlit UI when done).
-desktop = ["PySide6-Essentials>=6.7", "pyqtgraph>=0.13", "PyOpenGL", "hidapi"]
-dev = ["pytest", "pytest-qt", "PySide6-Essentials>=6.7", "pyqtgraph>=0.13", "PyOpenGL", "hidapi"]
-
-[project.scripts]
-lmd-fixer = "lmd_fixer.cli:main"
+dev = ["pytest", "pytest-qt"]
 
 [project.gui-scripts]
-lmd-fixer-desktop = "lmd_fixer.desktop.main:main"
+# A GUI script: on Windows it starts without a console window.
+lmd-fixer = "lmd_fixer.cli:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "lmd_fixer.__version__"}

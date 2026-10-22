@@ -8,12 +8,15 @@ else installed.
 The virtual environment and PyInstaller's working files go under
 %LOCALAPPDATA%\LMD-Fixer-build. That's outside OneDrive on purpose: an
 unzipped build is a few thousand files, and syncing every rebuild is slow.
-Only the finished zip is written into the repo (dist\ is git-ignored).
+Only the finished zip is written into the repo (dist\ is git-ignored). The
+environment is rebuilt from scratch whenever requirements-build.txt changes.
 
-After building, the self-test checks that the app starts. If the example .ptp
-files are in lmd_fixer\tests (they're git-ignored, so only on machines that
-have them), it also runs the full pipeline through the built .exe and through
-the source code, and fails unless the two outputs are byte-for-byte identical.
+After building, the self-test checks the app starts (offscreen, in every
+theme). If the example .ptp files are in lmd_fixer\tests (they're git-ignored,
+so only on machines that have them), it also runs the full review through
+the built .exe and through the source code, and fails unless the two outputs
+are byte-for-byte identical. The .exe has no console, so it reports through a
+file (--report) and its exit code.
 #>
 param(
     [string]$WorkDir = (Join-Path $env:LOCALAPPDATA "LMD-Fixer-build"),
@@ -33,19 +36,41 @@ function Invoke-Native([string]$What, [scriptblock]$Command) {
     if ($LASTEXITCODE -ne 0) { throw "$What failed (exit code $LASTEXITCODE)" }
 }
 
+# Runs the windowed .exe's self-test: waits for it, shows its report, and
+# fails on a non-zero exit code. Arguments are quoted, since paths have spaces.
+function Invoke-ExeSelfTest([string]$What, [string]$Exe, [string[]]$Arguments, [string]$Report) {
+    if (Test-Path $Report) { Remove-Item $Report }
+    $quoted = ($Arguments + @("--report", $Report) | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $p = Start-Process -FilePath $Exe -ArgumentList "--selftest $quoted" -Wait -PassThru
+    if (Test-Path $Report) { Get-Content $Report | ForEach-Object { Write-Host $_ } }
+    if ($p.ExitCode -ne 0) { throw "$What failed (exit code $($p.ExitCode))" }
+}
+
 $Venv = Join-Path $WorkDir "venv"
 $Py = Join-Path $Venv "Scripts\python.exe"
+$Requirements = Join-Path $Repo "packaging\requirements-build.txt"
+$Stamp = Join-Path $Venv "requirements.sha256"
+$Wanted = (Get-FileHash $Requirements -Algorithm SHA256).Hash
+if ((Test-Path $Py) -and (-not (Test-Path $Stamp) -or (Get-Content $Stamp) -ne $Wanted)) {
+    Write-Host "Build requirements changed: recreating $Venv"
+    Remove-Item -Recurse -Force $Venv
+}
 if (-not (Test-Path $Py)) {
     Write-Host "Creating build environment in $Venv"
     Invoke-Native "Creating the virtual environment" { & $Python -m venv $Venv }
 }
 Write-Host "Installing pinned dependencies"
 Invoke-Native "pip install" {
-    & $Py -m pip install --quiet --disable-pip-version-check -r (Join-Path $Repo "packaging\requirements-build.txt")
+    & $Py -m pip install --quiet --disable-pip-version-check -r $Requirements
 }
+Set-Content -Path $Stamp -Value $Wanted
 
 $Version = (& $Py -c "import lmd_fixer; print(lmd_fixer.__version__)").Trim()
 Write-Host "Building LMD Fixer v$Version"
+
+$Icon = Join-Path $WorkDir "icon.ico"
+Invoke-Native "Drawing the icon" { & $Py -m lmd_fixer.desktop.icon $Icon }
+$env:LMD_FIXER_ICON = $Icon
 
 $Dist = Join-Path $WorkDir "dist"
 Invoke-Native "PyInstaller" {
@@ -61,11 +86,11 @@ Copy-Item (Join-Path $Repo "lmd_fixer\fix_settings.toml") $App
 Copy-Item (Join-Path $Repo "packaging\README.txt") $App
 
 if (-not $SkipSelfTest) {
-    Write-Host "`nSelf-test: built app"
-    Invoke-Native "Self-test" { & $Exe --selftest }
-
     $Out = Join-Path $WorkDir "selftest"
     New-Item -ItemType Directory -Force $Out | Out-Null
+    Write-Host "`nSelf-test: built app"
+    Invoke-ExeSelfTest "Self-test" $Exe @() (Join-Path $Out "app.txt")
+
     foreach ($name in @("O1140 - Original.ptp", "O1145.ptp")) {
         $source = Join-Path $Repo "lmd_fixer\tests\$name"
         if (-not (Test-Path $source)) {
@@ -75,7 +100,7 @@ if (-not $SkipSelfTest) {
         $built = Join-Path $Out "$name.built"
         $fromSource = Join-Path $Out "$name.source"
         Write-Host "`nSelf-test: $name through the built app"
-        Invoke-Native "Self-test on $name" { & $Exe --selftest $source $built }
+        Invoke-ExeSelfTest "Self-test on $name" $Exe @($source, $built) (Join-Path $Out "$name.txt")
         Write-Host "Self-test: $name through the source code"
         Invoke-Native "Source self-test on $name" { & $Py -m lmd_fixer.cli --selftest $source $fromSource }
         if ((Get-FileHash $built).Hash -ne (Get-FileHash $fromSource).Hash) {

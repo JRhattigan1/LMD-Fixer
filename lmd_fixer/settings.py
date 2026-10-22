@@ -4,19 +4,13 @@ the app offers."""
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # Python 3.10: Streamlit already depends on `toml`
-    import toml as _toml
 
-    def _load_toml(path: Path) -> dict:
-        return _toml.loads(path.read_text(encoding="utf-8"))
-else:
-    def _load_toml(path: Path) -> dict:
-        with path.open("rb") as f:
-            return tomllib.load(f)
+def _load_toml(path: Path) -> dict:
+    with path.open("rb") as f:
+        return tomllib.load(f)
 
 # The copy shipped inside the package. A packaged build can't edit that one in
 # place (it sits among the app's internal files and is replaced on update), so

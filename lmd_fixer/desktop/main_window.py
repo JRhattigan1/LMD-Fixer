@@ -492,7 +492,7 @@ class MainWindow(QMainWindow):
         try:
             program = GCodeProgram.from_file(path)
         except OSError as exc:
-            QMessageBox.critical(self, "Couldn't open the file", str(exc))
+            self.show_error("Couldn't open the file", str(exc))
             return False
         program.source_name = Path(path).name
         self.path = path
@@ -557,6 +557,11 @@ class MainWindow(QMainWindow):
         self._update()
 
     # -- questions (methods, so tests can answer them) ---------------------------
+
+    def show_error(self, title: str, text: str) -> None:
+        """Errors the user should see. A method, so the self-test (which has
+        no one to click OK) can send them to its report instead."""
+        QMessageBox.critical(self, title, text)
 
     def ask(self, title: str, text: str) -> bool:
         return QMessageBox.question(self, title, text) == QMessageBox.Yes
@@ -804,7 +809,7 @@ class MainWindow(QMainWindow):
         try:
             Path(path).write_bytes(plan.to_bytes())
         except OSError as exc:
-            QMessageBox.critical(self, "Couldn't save the file", str(exc))
+            self.show_error("Couldn't save the file", str(exc))
             return
         self.output_name = Path(path).name
         self.final.name.setText(self.output_name)

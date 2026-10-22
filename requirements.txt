@@ -1,1 +1,8 @@
-streamlit>=1.36  # developed and tested against 1.58
+# Runtime dependencies for running from a checkout (python -m lmd_fixer.desktop).
+# Pinned versions for the Windows build are in packaging/requirements-build.txt.
+PySide6-Essentials>=6.7
+pyqtgraph>=0.13
+PyOpenGL
+numpy
+pandas
+hidapi
