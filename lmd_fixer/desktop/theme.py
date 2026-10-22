@@ -1,79 +1,159 @@
-"""Colours and the dark Qt palette, matching the browser version's look."""
+"""Themes: Dark (default), Light and Vivid, in a macOS-inspired style.
+
+Each theme is a set of colour tokens. `use(name)` copies the chosen theme's
+tokens into this module's globals, so code that reads `theme.TEXT` etc. at
+draw time always gets the current theme; `apply_theme` also rebuilds the Qt
+palette and stylesheet. Widgets that cache colours (the syntax highlighter,
+the maps) are refreshed by `MainWindow.set_theme`.
+
+Map state colours are per theme and were validated with the dataviz skill's
+validate_palette.py against that theme's CANVAS: blue/red for kept/removed
+and blue/orange for unchanged/new P pass every check on all three canvases
+(CVD ΔE 24–27). Green/red was dropped: on white it failed contrast, and a
+darker green fell into the colour-blind warning band.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
+from dataclasses import dataclass, fields
+
+import tempfile
+from pathlib import Path
+
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication
 
-SURFACE = "#272b33"  # window background (the browser app's surface)
-PANEL = "#1f232a"  # text areas and lists
-PANEL_ALT = "#232831"
-RAISED = "#2f3540"  # buttons
-TEXT = "#c2c7d1"
-DIM = "#8b93a3"
-ACCENT = "#2dd4bf"
-PRIMARY = "#00d86c"
-FOCUS = "#f4f1e6"
-
-# Proposed-change marks in the G-code view and lists. Translucent, so the
-# syntax colours still read through them.
-REMOVE_BG = QColor(248, 81, 73, 70)
-MODIFY_BG = QColor(227, 179, 65, 70)
-REJECTED_BG = QColor(255, 255, 255, 14)
-REMOVE_MARK = QColor("#f85149")
-MODIFY_MARK = QColor("#e3b341")
-
-# Bed map states, each pair validated against SURFACE with the dataviz
-# skill's validate_palette.py. Never the only cue: removal is also dashed,
-# tinted and labelled ✕; a new P is also thicker with a bold label.
-REMOVAL_KEPT = "#1baf7a"
-REMOVAL_GONE = "#d03b3b"  # deutan ΔE 9.9 against KEPT; just under 3:1 on SURFACE
-RECIPE_UNCHANGED = "#3987e5"
-RECIPE_CHANGED = "#d95a1d"  # protan ΔE 27 against UNCHANGED; all checks pass
-
-# Diff view rows.
-DIFF_DELETE_BG = QColor(248, 81, 73, 40)
-DIFF_INSERT_BG = QColor(63, 185, 80, 36)
-DIFF_GAP_BG = QColor(255, 255, 255, 8)
+THEME_NAMES = ["Dark", "Light", "Vivid"]
+DEFAULT_THEME = "Dark"
 
 
-def apply_theme(app: QApplication) -> None:
-    app.setStyle("Fusion")
-    p = QPalette()
-    colours = {
-        QPalette.Window: SURFACE,
-        QPalette.WindowText: TEXT,
-        QPalette.Base: PANEL,
-        QPalette.AlternateBase: PANEL_ALT,
-        QPalette.Text: TEXT,
-        QPalette.Button: RAISED,
-        QPalette.ButtonText: TEXT,
-        QPalette.BrightText: FOCUS,
-        QPalette.Highlight: ACCENT,
-        QPalette.HighlightedText: "#10151c",
-        QPalette.ToolTipBase: "#161b24",
-        QPalette.ToolTipText: TEXT,
-        QPalette.PlaceholderText: DIM,
-        QPalette.Link: ACCENT,
-    }
-    for role, colour in colours.items():
-        p.setColor(role, QColor(colour))
-    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
-        p.setColor(QPalette.Disabled, role, QColor("#5d6470"))
-    app.setPalette(p)
-    app.setStyleSheet(
-        f"""
-        QToolTip {{ border: 1px solid #3a4150; padding: 4px; }}
-        QDockWidget::title {{ padding: 6px; background: {PANEL}; }}
-        QPushButton {{ padding: 5px 12px; border-radius: 6px; border: 1px solid #3a4150; }}
-        QPushButton:default, QPushButton[primary="true"] {{
-            background: {PRIMARY}; color: #0c1410; border: none; font-weight: 600;
-        }}
-        QPushButton:disabled {{ color: #5d6470; background: {PANEL}; }}
-        QLabel[role="title"] {{ font-size: 16pt; font-weight: 600; color: #e6e9ef; }}
-        QLabel[role="dim"] {{ color: {DIM}; }}
-        """
-    )
+@dataclass(frozen=True)
+class Theme:
+    name: str
+    dark: bool
+    # Surfaces
+    WINDOW: str
+    SIDEBAR: str
+    CARD: str
+    FIELD: str
+    RAISED: str
+    CANVAS: str  # map, 3D and code backgrounds
+    SEPARATOR: str
+    # Text
+    TEXT: str
+    DIM: str  # secondary
+    FAINT: str  # tertiary
+    # Accent
+    ACCENT: str
+    ACCENT_TEXT: str
+    ACCENT_2: str  # second stop of the primary button (same as ACCENT unless vivid)
+    SUCCESS: str
+    FOCUS: str  # selection outlines on the maps
+    # Code
+    SYN_G: str
+    SYN_M: str
+    SYN_F: str
+    SYN_P: str
+    SYN_O: str
+    SYN_COMMENT: str
+    SYN_MARKER: str
+    # Maps (validated pairs, see module docstring)
+    NEUTRAL: str
+    TRAVEL: str
+    REMOVAL_KEPT: str
+    REMOVAL_GONE: str
+    RECIPE_UNCHANGED: str
+    RECIPE_CHANGED: str
+    # Change marks (alpha 0-255)
+    MARK_ALPHA: int
+
+
+THEMES = {
+    "Dark": Theme(
+        "Dark", True,
+        WINDOW="#1e1e20", SIDEBAR="#28282b", CARD="#232326", FIELD="#2c2c2f", RAISED="#3a3a3d",
+        CANVAS="#18181a", SEPARATOR="#38383b",
+        TEXT="#f2f2f7", DIM="#a1a1a6", FAINT="#6e6e73",
+        ACCENT="#0a84ff", ACCENT_TEXT="#ffffff", ACCENT_2="#0a84ff", SUCCESS="#30d158", FOCUS="#f5f5f7",
+        SYN_G="#6cb6ff", SYN_M="#d2a8ff", SYN_F="#ffb86b", SYN_P="#7ee787", SYN_O="#64d2ff",
+        SYN_COMMENT="#7c7c82", SYN_MARKER="#64d2ff",
+        NEUTRAL="#6c7480", TRAVEL="#8e8e93",
+        REMOVAL_KEPT="#3987e5", REMOVAL_GONE="#d03b3b", RECIPE_UNCHANGED="#3987e5", RECIPE_CHANGED="#d95a1d",
+        MARK_ALPHA=70,
+    ),
+    "Light": Theme(
+        "Light", False,
+        WINDOW="#f5f5f7", SIDEBAR="#ebebee", CARD="#ffffff", FIELD="#ffffff", RAISED="#ffffff",
+        CANVAS="#ffffff", SEPARATOR="#d9d9de",
+        TEXT="#1d1d1f", DIM="#6e6e73", FAINT="#aeaeb2",
+        ACCENT="#007aff", ACCENT_TEXT="#ffffff", ACCENT_2="#007aff", SUCCESS="#28a745", FOCUS="#1d1d1f",
+        SYN_G="#0b4f9e", SYN_M="#9b2393", SYN_F="#b35a00", SYN_P="#1e7d32", SYN_O="#0e6b8a",
+        SYN_COMMENT="#8a8a8e", SYN_MARKER="#0e6b8a",
+        NEUTRAL="#9aa1ab", TRAVEL="#aeaeb2",
+        REMOVAL_KEPT="#2a78d6", REMOVAL_GONE="#d03b3b", RECIPE_UNCHANGED="#2a78d6", RECIPE_CHANGED="#d95a1d",
+        MARK_ALPHA=55,
+    ),
+    "Vivid": Theme(
+        "Vivid", True,
+        WINDOW="#1a0b38", SIDEBAR="#271055", CARD="#211049", FIELD="#2e1663", RAISED="#3b1d7c",
+        CANVAS="#120726", SEPARATOR="#43228a",
+        TEXT="#fff4fb", DIM="#c9b6ff", FAINT="#8f7bd6",
+        ACCENT="#ff2d95", ACCENT_TEXT="#ffffff", ACCENT_2="#ff9f0a", SUCCESS="#32d74b", FOCUS="#00e5ff",
+        SYN_G="#00e5ff", SYN_M="#ff6ad5", SYN_F="#ffd60a", SYN_P="#9dff5c", SYN_O="#ff9f0a",
+        SYN_COMMENT="#9d86e0", SYN_MARKER="#ff9f0a",
+        NEUTRAL="#7b6aa8", TRAVEL="#9d86e0",
+        REMOVAL_KEPT="#3987e5", REMOVAL_GONE="#d03b3b", RECIPE_UNCHANGED="#3987e5", RECIPE_CHANGED="#d95a1d",
+        MARK_ALPHA=80,
+    ),
+}
+
+# Current theme's tokens, as module globals (see module docstring). Set by use().
+current: Theme = THEMES[DEFAULT_THEME]
+WINDOW = SIDEBAR = CARD = FIELD = RAISED = CANVAS = SEPARATOR = ""
+TEXT = DIM = FAINT = ACCENT = ACCENT_TEXT = ACCENT_2 = SUCCESS = FOCUS = ""
+SYN_G = SYN_M = SYN_F = SYN_P = SYN_O = SYN_COMMENT = SYN_MARKER = ""
+NEUTRAL = TRAVEL = REMOVAL_KEPT = REMOVAL_GONE = RECIPE_UNCHANGED = RECIPE_CHANGED = ""
+MARK_ALPHA = 70
+# Older names still used around the app.
+SURFACE = PANEL = ""
+# Proposed-change marks and diff rows, derived per theme in use().
+REMOVE_BG = MODIFY_BG = REJECTED_BG = REMOVE_MARK = MODIFY_MARK = QColor()
+DIFF_DELETE_BG = DIFF_INSERT_BG = DIFF_GAP_BG = QColor()
+
+
+def use(name: str) -> Theme:
+    """Makes `name` the current theme's tokens (no Qt calls; see apply_theme)."""
+    global current, SURFACE, PANEL, REMOVE_BG, MODIFY_BG, REJECTED_BG, REMOVE_MARK, MODIFY_MARK
+    global DIFF_DELETE_BG, DIFF_INSERT_BG, DIFF_GAP_BG
+    t = THEMES.get(name, THEMES[DEFAULT_THEME])
+    current = t
+    for f in fields(Theme):
+        if f.name not in ("name", "dark"):
+            globals()[f.name] = getattr(t, f.name)
+    SURFACE = t.CANVAS
+    PANEL = t.CANVAS
+    a = t.MARK_ALPHA
+    REMOVE_BG = QColor(248, 81, 73, a)
+    MODIFY_BG = QColor(227, 179, 65, a)
+    REJECTED_BG = QColor(127, 127, 127, 26)
+    REMOVE_MARK = QColor("#f85149")
+    MODIFY_MARK = QColor("#e3b341")
+    DIFF_DELETE_BG = QColor(248, 81, 73, a // 2 + 10)
+    DIFF_INSERT_BG = QColor(52, 199, 89, a // 2 + 10)
+    DIFF_GAP_BG = QColor(127, 127, 127, 22)
+    return t
+
+
+use(DEFAULT_THEME)
+
+
+def ui_font(size: float = 10, bold: bool = False) -> QFont:
+    font = QFont()
+    font.setFamilies(["Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", font.defaultFamily()])
+    font.setPointSizeF(size)
+    font.setBold(bold)
+    return font
 
 
 def code_font() -> QFont:
@@ -81,3 +161,164 @@ def code_font() -> QFont:
     font.setFamilies(["Cascadia Mono", "Consolas", font.family()])
     font.setPointSize(10)
     return font
+
+
+def apply_theme(app: QApplication, name: str = DEFAULT_THEME) -> Theme:
+    t = use(name)
+    app.setStyle("Fusion")
+    app.setFont(ui_font(10))
+    p = QPalette()
+    roles = {
+        QPalette.Window: t.WINDOW, QPalette.WindowText: t.TEXT, QPalette.Base: t.CARD,
+        QPalette.AlternateBase: t.FIELD, QPalette.Text: t.TEXT, QPalette.Button: t.RAISED,
+        QPalette.ButtonText: t.TEXT, QPalette.BrightText: t.FOCUS, QPalette.Highlight: t.ACCENT,
+        QPalette.HighlightedText: t.ACCENT_TEXT, QPalette.ToolTipBase: t.CARD, QPalette.ToolTipText: t.TEXT,
+        QPalette.PlaceholderText: t.FAINT, QPalette.Link: t.ACCENT, QPalette.Mid: t.SEPARATOR,
+        QPalette.Midlight: t.SEPARATOR, QPalette.Light: t.RAISED,
+    }
+    for role, colour in roles.items():
+        p.setColor(role, QColor(colour))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        p.setColor(QPalette.Disabled, role, QColor(t.FAINT))
+    app.setPalette(p)
+    app.setStyleSheet(stylesheet(t, _check_image()))
+    return t
+
+
+def _check_image() -> str:
+    """A white tick for checked boxes, drawn once and kept in the temp
+    folder: Qt style sheets can only take an image from a file."""
+    path = Path(tempfile.gettempdir()) / "lmd-fixer-ui" / "check.png"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pix = QPixmap(32, 32)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#ffffff"), 4.2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        tick = QPainterPath(QPointF(8, 16.5))
+        tick.lineTo(13.5, 22)
+        tick.lineTo(24, 10)
+        p.drawPath(tick)
+        p.end()
+        pix.save(str(path))
+    return path.as_posix()
+
+
+def _rgba(colour: str, alpha: float) -> str:
+    c = QColor(colour)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
+
+
+def stylesheet(t: Theme, check_image: str = "") -> str:
+    sel = _rgba(t.ACCENT, 0.28 if t.dark else 0.18)
+    hover = _rgba(t.TEXT, 0.06)
+    primary_bg = (f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {t.ACCENT}, stop:1 {t.ACCENT_2})"
+                  if t.ACCENT_2 != t.ACCENT else t.ACCENT)
+    return f"""
+    QWidget {{ color: {t.TEXT}; }}
+    QMainWindow, QDialog {{ background: {t.WINDOW}; }}
+    QToolTip {{ background: {t.CARD}; color: {t.TEXT}; border: 1px solid {t.SEPARATOR};
+                border-radius: 6px; padding: 6px 8px; }}
+
+    /* Toolbar and menus */
+    QToolBar {{ background: {t.WINDOW}; border: none; padding: 6px 10px; spacing: 4px; }}
+    QToolBar::separator {{ width: 1px; background: {t.SEPARATOR}; margin: 6px 8px; }}
+    QToolButton {{ border: none; border-radius: 7px; padding: 5px 10px; color: {t.TEXT}; }}
+    QToolButton:hover {{ background: {hover}; }}
+    QToolButton:disabled {{ color: {t.FAINT}; }}
+    QMenuBar {{ background: {t.WINDOW}; padding: 2px 6px; }}
+    QMenuBar::item {{ padding: 4px 10px; border-radius: 6px; }}
+    QMenuBar::item:selected {{ background: {hover}; }}
+    QMenu {{ background: {t.CARD}; border: 1px solid {t.SEPARATOR}; border-radius: 8px; padding: 4px; }}
+    QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: 5px; }}
+    QMenu::item:selected {{ background: {t.ACCENT}; color: {t.ACCENT_TEXT}; }}
+    QMenu::separator {{ height: 1px; background: {t.SEPARATOR}; margin: 4px 8px; }}
+
+    /* Theme switch: a segmented control */
+    QToolButton[segment="true"] {{ background: {t.FIELD}; border-radius: 0; padding: 4px 12px;
+                                   border: 1px solid {t.SEPARATOR}; color: {t.DIM}; }}
+    QToolButton[segment="true"]:checked {{ background: {t.ACCENT}; color: {t.ACCENT_TEXT}; border-color: {t.ACCENT}; }}
+    QToolButton[edge="first"] {{ border-top-left-radius: 7px; border-bottom-left-radius: 7px; }}
+    QToolButton[edge="last"] {{ border-top-right-radius: 7px; border-bottom-right-radius: 7px; }}
+
+    /* Sidebar */
+    QWidget#sidebar {{ background: {t.SIDEBAR}; border-right: 1px solid {t.SEPARATOR}; }}
+    QFrame#steprow {{ border-radius: 9px; background: transparent; }}
+    QFrame#steprow:hover {{ background: {hover}; }}
+    QFrame#steprow[current="true"] {{ background: {_rgba(t.ACCENT, 0.18)}; }}
+
+    /* Cards */
+    QFrame#card {{ background: {t.CARD}; border: 1px solid {t.SEPARATOR}; border-radius: 12px; }}
+
+    /* Text roles */
+    QLabel[role="title"] {{ font-size: 16pt; font-weight: 600; }}
+    QLabel[role="heading"] {{ font-size: 12pt; font-weight: 600; }}
+    QLabel[role="dim"] {{ color: {t.DIM}; }}
+    QLabel[role="faint"] {{ color: {t.FAINT}; }}
+    QLabel[role="warning"] {{ color: #ff9f0a; }}
+
+    /* Buttons */
+    QPushButton {{ background: {t.RAISED}; border: 1px solid {t.SEPARATOR}; border-radius: 8px;
+                   padding: 6px 14px; color: {t.TEXT}; }}
+    QPushButton:hover {{ border-color: {t.DIM}; }}
+    QPushButton:pressed {{ background: {t.FIELD}; }}
+    QPushButton:disabled {{ color: {t.FAINT}; background: {t.FIELD}; border-color: {t.SEPARATOR}; }}
+    QPushButton[primary="true"] {{ background: {primary_bg}; color: {t.ACCENT_TEXT}; border: none;
+                                   border-radius: 15px; padding: 7px 20px; font-weight: 600; }}
+    QPushButton[primary="true"]:disabled {{ background: {t.FIELD}; color: {t.FAINT}; }}
+    QPushButton[flat="true"] {{ background: transparent; border: none; color: {t.ACCENT}; padding: 4px 8px; }}
+    QPushButton[flat="true"]:hover {{ background: {hover}; }}
+
+    /* Fields */
+    QLineEdit, QSpinBox, QComboBox {{ background: {t.FIELD}; border: 1px solid {t.SEPARATOR};
+                                      border-radius: 7px; padding: 4px 8px; selection-background-color: {t.ACCENT}; }}
+    QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border: 2px solid {t.ACCENT}; padding: 3px 7px; }}
+    QComboBox::drop-down {{ border: none; width: 18px; }}
+    QComboBox QAbstractItemView {{ background: {t.CARD}; border: 1px solid {t.SEPARATOR};
+                                   selection-background-color: {t.ACCENT}; selection-color: {t.ACCENT_TEXT}; }}
+    QCheckBox {{ spacing: 8px; }}
+    QCheckBox::indicator, QTreeView::indicator {{ width: 16px; height: 16px; }}
+    QCheckBox::indicator:unchecked, QTreeView::indicator:unchecked {{
+        border: 2px solid {t.FAINT}; border-radius: 5px; background: {t.FIELD}; }}
+    QCheckBox::indicator:unchecked:hover, QTreeView::indicator:unchecked:hover {{ border-color: {t.ACCENT}; }}
+    QCheckBox::indicator:checked, QTreeView::indicator:checked {{
+        border: 2px solid {t.ACCENT}; border-radius: 5px; background: {t.ACCENT}; image: url({check_image}); }}
+
+    /* Lists and tables */
+    QTreeView, QTableView, QListWidget, QPlainTextEdit {{ background: {t.CARD}; border: none;
+        selection-background-color: {sel}; selection-color: {t.TEXT}; outline: 0; }}
+    QTreeView::item {{ padding: 4px 4px; border: none; }}
+    QTreeView::item:selected {{ background: {sel}; color: {t.TEXT}; }}
+    QTreeView::item:hover {{ background: {hover}; }}
+    QHeaderView {{ background: transparent; }}
+    QHeaderView::section {{ background: {t.CARD}; color: {t.DIM}; border: none;
+        border-bottom: 1px solid {t.SEPARATOR}; padding: 6px 6px; font-weight: 600; }}
+    QTableCornerButton::section {{ background: {t.CARD}; border: none; }}
+
+    /* Tabs as a segmented control */
+    QTabWidget::pane {{ border: none; }}
+    QTabWidget::tab-bar {{ alignment: center; }}
+    QTabBar::tab {{ background: {t.FIELD}; color: {t.DIM}; padding: 5px 18px; margin: 6px 0;
+                    border: 1px solid {t.SEPARATOR}; }}
+    QTabBar::tab:first {{ border-top-left-radius: 7px; border-bottom-left-radius: 7px; }}
+    QTabBar::tab:last {{ border-top-right-radius: 7px; border-bottom-right-radius: 7px; }}
+    QTabBar::tab:selected {{ background: {t.ACCENT}; color: {t.ACCENT_TEXT}; border-color: {t.ACCENT}; }}
+
+    /* Splitters and scroll bars */
+    QSplitter::handle {{ background: transparent; }}
+    QSplitter::handle:horizontal {{ width: 8px; }}
+    QSplitter::handle:vertical {{ height: 8px; }}
+    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+    QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+    QScrollBar::handle {{ background: {_rgba(t.TEXT, 0.22)}; border-radius: 4px; min-height: 24px; min-width: 24px; }}
+    QScrollBar::handle:hover {{ background: {_rgba(t.TEXT, 0.38)}; }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+    QStatusBar {{ background: {t.WINDOW}; color: {t.DIM}; }}
+    QStatusBar::item {{ border: none; }}
+    """

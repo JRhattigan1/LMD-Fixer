@@ -118,11 +118,11 @@ def test_selection_change_mid_review_asks_first(window, sample_file, monkeypatch
     window.open_file(str(sample_file))
     window.apply_step()
     monkeypatch.setattr(window, "confirm_restart", lambda: False)
-    window.steps.list.item(0).setCheckState(Qt.Unchecked)  # untick rotary
+    window.steps.rows[0].switch.setChecked(False)  # switch rotary off
     assert window.session.index == 1  # kept the review
     assert "remove_rotary_table" in window.steps.selected()  # tick put back
     monkeypatch.setattr(window, "confirm_restart", lambda: True)
-    window.steps.list.item(0).setCheckState(Qt.Unchecked)
+    window.steps.rows[0].switch.setChecked(False)
     assert window.session.index == 0 and window.session.fix_id == "remove_named_sections"
 
 
@@ -312,3 +312,26 @@ def test_spacemouse_report_parsing():
     parse_report([1] + [0x5E, 0x01] * 6, m)
     assert (m.tx, m.rz) == (1.0, 1.0)
     assert Motion().is_idle() and not m.is_idle()
+
+
+def test_theme_switch_applies_and_is_remembered(window, sample_file):
+    from lmd_fixer.desktop import theme
+
+    window.open_file(str(sample_file))
+    window.apply_step()  # sections, so the map is styled
+    for name in theme.THEME_NAMES:
+        window.theme_buttons.button(theme.THEME_NAMES.index(name)).click()
+        assert theme.current.name == name and window.settings.value("theme") == name
+        assert window.map.backgroundBrush().color().name() == theme.CANVAS
+        kept = window.map._paths[start_of(window, "PATH_A")].pen().color().name()
+        assert kept == theme.REMOVAL_KEPT
+    window.set_theme("Dark")
+
+
+def test_unticked_rows_still_show_a_tick_box(window, sample_file):
+    """Regression: rows that started unticked had no check state set, so no box."""
+    window.open_file(str(sample_file))
+    window.apply_step()  # sections start unticked
+    tree = window.checklist.tree
+    assert all(tree.topLevelItem(i).data(0, Qt.CheckStateRole) is not None
+               for i in range(tree.topLevelItemCount()))

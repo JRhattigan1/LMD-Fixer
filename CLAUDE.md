@@ -84,7 +84,12 @@ needed; it's in git history (`adjust_section_feeds.py`,
   affected — `run_fix` runs any fix named explicitly. The shipped file
   switches every fix on.
 - `lmd_fixer/desktop/` — the PySide6 desktop app replacing the Streamlit UI
-  (in progress; `python -m lmd_fixer.desktop`). `MainWindow` owns one
+  (in progress; `python -m lmd_fixer.desktop`). Layout: the fixes sidebar
+  (`steps_panel.py`: status mark, title, `ToggleSwitch` per fix) on the
+  left; on the right, a card holding the Plan/3D tabs and the code (or the
+  final diff), a card holding the step panel, and a bar with Back / Skip /
+  Apply step. Keyboard hints live in tooltips and Help → Keyboard and
+  mouse, not on screen. `MainWindow` owns one
   `ReviewSession` and calls `_update()` after every step move, which redraws
   everything from the session. Step panels live in `desktop/steps/`, one per
   `review_mode` (`checklist.py` serves "checklist" and "sections",
@@ -130,6 +135,33 @@ needed; it's in git history (`adjust_section_feeds.py`,
   To look at it, render with the real `windows` platform and
   `grabFramebuffer()`. The offscreen platform gets a context but produces no
   image, and `widget.grab()` leaves GL panes blank.
+- **Themes** (`desktop/theme.py`): Dark (default), Light and Vivid, picked
+  from the segmented control at the right of the toolbar and remembered in
+  `QSettings` ("theme"). A theme is a set of colour tokens. `use()` copies
+  them into module globals, so draw-time reads like `theme.TEXT` follow the
+  current theme; `apply_theme` also rebuilds the palette and the one app
+  stylesheet. Widgets that cache colours are refreshed by
+  `MainWindow.set_theme`: the highlighter `reload()`s, and the map, 3D view
+  and code view each have `refresh_theme()`. Don't hard-code colours in a
+  widget; add a token. Map state colours are per theme and validated
+  against that theme's `CANVAS`. Kept/removed is blue/red, not green/red:
+  on white the green failed contrast, and a darker green fell into the
+  colour-blind warning band. Qt gotchas met here:
+  - a `QTreeWidgetItem` shows no tick box until its check state is set
+    explicitly, so set it on every row, including unticked ones;
+  - a stylesheet rule for `QTableView::item` makes the table ignore the
+    model's `BackgroundRole`, which hid the diff colours;
+  - fractional border widths on `::indicator` are dropped;
+  - a QSS image must be a file, so the tick is drawn at startup into the
+    temp folder (`_check_image`).
+- **SpaceMouse** (`desktop/spacemouse.py`): reads 3Dconnexion HID reports
+  through `hidapi`. Report 1 is translation, report 2 rotation and report 3
+  buttons; newer devices put all six axes in report 1. Windows lets it read
+  alongside 3DxWare. A timer drains the reports each tick and keeps moving
+  while the cap is held off-centre. `MainWindow.start_spacemouse()` is
+  called from `main()`, never the constructor, so tests don't grab a real
+  device. Motion goes to the visible view's `apply_motion`; response
+  constants are at the top of `view3d.py`.
 - **Material database dialog** (`desktop/recipe_dialog.py`): a
   `QStandardItemModel` behind a filter proxy. Cells are text until Save,
   which runs `recipes.validate_recipes` / `stamp_changed` / `save_recipes`.

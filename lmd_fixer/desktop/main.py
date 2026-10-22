@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from lmd_fixer import __version__
@@ -17,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("LMD Fixer")
     app.setOrganizationName("LMD-Fixer")
     app.setApplicationVersion(__version__)
-    apply_theme(app)
+    apply_theme(app, QSettings().value("theme", "Dark"))
     window = MainWindow()
     window.show()
     window.start_spacemouse()

@@ -68,7 +68,7 @@ class RecipesPanel(QWidget):
 
         self.header = StepHeader()
         self.db_note = QLabel()
-        self.db_note.setProperty("role", "dim")
+        self.db_note.setProperty("role", "faint")
         self.db_note.setWordWrap(True)
 
         self.new_p = QSpinBox()
@@ -81,6 +81,7 @@ class RecipesPanel(QWidget):
         self.set_button.setProperty("primary", True)
         self.set_button.clicked.connect(self.set_selected)
         self.reset_button = QPushButton("Reset selected")
+        self.reset_button.setProperty("flat", True)
         self.reset_button.setToolTip("Back to each selected toolpath's original P")
         self.reset_button.clicked.connect(self.reset_selected)
         self.count = QLabel()
@@ -91,24 +92,25 @@ class RecipesPanel(QWidget):
         self.tree.setHeaderLabels(COLUMNS)
         self.tree.setRootIsDecorated(False)
         self.tree.setUniformRowHeights(True)
-        self.tree.setAlternatingRowColors(True)
+        self.tree.setToolTip("Select toolpaths here or on the map (drag a box for many), type the P, "
+                             "press Enter · Ctrl+Z undo")
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.header().setSectionResizeMode(4, QHeaderView.Stretch)
         self.tree.itemSelectionChanged.connect(self._selection_changed)
 
         bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.addWidget(self.count)
+        bar.addStretch(1)
+        bar.addWidget(self.reset_button)
+        bar.addSpacing(8)
         bar.addWidget(QLabel("New P"))
         bar.addWidget(self.new_p)
         bar.addWidget(self.set_button)
-        bar.addWidget(self.reset_button)
-        bar.addSpacing(12)
-        bar.addWidget(self.count)
-        bar.addStretch(1)
-        hint = QLabel("Select toolpaths here or on the map (drag a box for many) · Enter sets · Ctrl+Z undo")
-        hint.setProperty("role", "dim")
-        bar.addWidget(hint)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
         layout.addWidget(self.header)
         layout.addWidget(self.db_note)
         layout.addLayout(bar)
@@ -144,8 +146,7 @@ class RecipesPanel(QWidget):
         try:
             self.recorded = recipe_db.summaries_by_p(recipe_db.load_recipes())
             self.db_note.setText(
-                "The program only names a recipe number; the settings shown are what the material database "
-                "records for it. Check the control panel matches before running."
+                "Settings come from the material database. Check the control panel matches before running."
             )
         except ValueError as exc:
             self.recorded = {}
@@ -175,11 +176,11 @@ class RecipesPanel(QWidget):
             new = chosen.get(call.start_index)
             item.setText(3, p_text(call, new) if new is not None else "")
             item.setFont(3, bold)
-            item.setForeground(3, QColor("#d95a1d"))
+            item.setForeground(3, QColor(theme.RECIPE_CHANGED))
             item.setText(4, self.recorded_as(self.final_p(call)))
         self.tree.resizeColumnToContents(3)
         changed = sum(1 for c in self.calls if c.start_index in chosen)
-        self.count.setText(f"{changed} of {len(self.calls)} toolpath(s) get a new P")
+        self.count.setText(f"<b>{changed}</b> of {len(self.calls)} toolpaths get a new P")
         self.choicesChanged.emit()
 
     # -- edits -------------------------------------------------------------------

@@ -22,7 +22,7 @@ from PySide6.QtGui import QColor, QFont, QMatrix4x4, QVector3D
 from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from lmd_fixer.desktop import theme
-from lmd_fixer.desktop.bed_map import NEUTRAL, ToolpathStyle
+from lmd_fixer.desktop.bed_map import ToolpathStyle
 from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.toolpaths import analyse_toolpaths, program_moves
 
@@ -33,7 +33,6 @@ SPACE_PAN_PX = 14.0
 SPACE_ZOOM = 0.035
 CLICK_SLOP_PX = 4  # movement below this between press and release is a click
 PICK_TOL_PX = 8
-TRAVEL_RGBA = (0.62, 0.66, 0.72, 0.35)
 Z_SCALES = [1, 2, 5, 10]
 
 
@@ -100,15 +99,16 @@ class View3D(QWidget):
         self.z_scale.setToolTip("Stretch heights, to pull stacked layers apart")
         self.z_scale.currentIndexChanged.connect(lambda _: self._rebuild())
         fit = QPushButton("Fit")
+        fit.setProperty("flat", True)
         fit.clicked.connect(self.fit)
-        hint = QLabel("Drag orbits · Ctrl/middle-drag pans · wheel zooms · click selects")
-        hint.setProperty("role", "dim")
+        self.setToolTip("Drag orbits · Ctrl/middle-drag pans · wheel zooms · click selects · "
+                        "SpaceMouse moves the view")
         bar = QHBoxLayout()
-        bar.setContentsMargins(4, 2, 4, 2)
-        for w in (self.show_travel, self.z_scale, fit):
-            bar.addWidget(w)
+        bar.setContentsMargins(10, 2, 10, 2)
+        bar.addWidget(self.show_travel)
         bar.addStretch(1)
-        bar.addWidget(hint)
+        bar.addWidget(self.z_scale)
+        bar.addWidget(fit)
         self.layout_ = QVBoxLayout(self)
         self.layout_.setContentsMargins(0, 0, 0, 0)
         self.layout_.addLayout(bar)
@@ -214,7 +214,7 @@ class View3D(QWidget):
                 self.doubleClicked.emit(ev.position())
 
         self.gl = _GLView()
-        self.gl.setBackgroundColor(QColor(theme.SURFACE))
+        self.gl.setBackgroundColor(QColor(theme.CANVAS))
         self.gl.clicked.connect(self._clicked)
         self.gl.doubleClicked.connect(self._double_clicked)
         self.layout_.replaceWidget(self.placeholder, self.gl)
@@ -240,7 +240,8 @@ class View3D(QWidget):
 
         lo = np.min([b[0] for b in self.boxes.values()], axis=0) if self.boxes else np.zeros(3)
         hi = np.max([b[1] for b in self.boxes.values()], axis=0) if self.boxes else np.ones(3)
-        grid = gl.GLGridItem(color=(255, 255, 255, 22))
+        g = QColor(theme.TEXT)
+        grid = gl.GLGridItem(color=(g.red(), g.green(), g.blue(), 26))
         size = max(hi[0] - lo[0], hi[1] - lo[1]) + 40
         grid.setSize(size, size, 1)
         grid.setSpacing(10, 10, 1)
@@ -250,7 +251,7 @@ class View3D(QWidget):
 
         self._travel_item = gl.GLLinePlotItem(
             pos=self._scaled(self.travel).reshape(-1, 3) if len(self.travel) else np.zeros((0, 3)),
-            color=TRAVEL_RGBA, width=1, mode="lines", antialias=True)
+            color=rgba(theme.TRAVEL, 0.4), width=1, mode="lines", antialias=True)
         self._travel_item.setVisible(self.show_travel.isChecked())
         self.gl.addItem(self._travel_item)
         for start, segs in self.deposition.items():
@@ -275,7 +276,7 @@ class View3D(QWidget):
         for start, item in self._items.items():
             style = self.styles.get(start, default)
             width = style.width + (1.5 if start in self._selected else 0)
-            item.setData(color=rgba(style.colour if style.colour else NEUTRAL), width=width)
+            item.setData(color=rgba(style.colour or theme.NEUTRAL), width=width)
             if style.label:
                 lo, hi = self.boxes[start]
                 pos = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, hi[2] * self._zk() + 2])
@@ -316,6 +317,11 @@ class View3D(QWidget):
         for start, item in self._items.items():
             style = self.styles.get(start, default)
             item.setData(width=style.width + (1.5 if start in self._selected else 0))
+
+    def refresh_theme(self) -> None:
+        if self.gl is not None:
+            self.gl.setBackgroundColor(QColor(theme.CANVAS))
+            self._rebuild()
 
     def fit(self) -> None:
         if self.gl is None or not self.boxes:

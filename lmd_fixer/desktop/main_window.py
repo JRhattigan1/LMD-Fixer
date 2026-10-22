@@ -1,5 +1,6 @@
-"""The workspace: steps on the left, the program (or the final diff) in the
-middle, and the current step's review below it."""
+"""The workspace: the fixes sidebar on the left; on the right, the map and
+the program (or the final diff) on one card and the current step's review
+on another, with the step's buttons in a bar beneath."""
 
 from __future__ import annotations
 
@@ -8,16 +9,20 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QColor, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
-    QDockWidget,
+    QApplication,
+    QButtonGroup,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -47,31 +52,54 @@ MAX_RECENT = 8
 CHECKLIST_MODES = {"checklist", "sections"}
 
 
+def card(widget: QWidget, margin: int = 1) -> QFrame:
+    """`widget` on a rounded card."""
+    frame = QFrame()
+    frame.setObjectName("card")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(margin, margin, margin, margin)
+    layout.addWidget(widget)
+    return frame
+
+
 class Welcome(QWidget):
-    """Shown until a file is open: what to do, and recent files."""
+    """Shown until a file is open: a drop target, Open, and recent files."""
 
     def __init__(self, window: "MainWindow") -> None:
         super().__init__()
         self.window_ = window
         title = QLabel("LMD Fixer")
-        title.setProperty("role", "title")
-        title.setStyleSheet(f"font-size: 24pt; color: {theme.ACCENT};")
-        blurb = QLabel(
-            "Open a .ptp program — or drop it on this window — then review each proposed change "
-            "before it happens.\nTick the fixes to run in the Steps list on the left."
-        )
-        blurb.setProperty("role", "dim")
-        open_button = QPushButton("Open a program…")
+        title.setFont(theme.ui_font(28, bold=True))
+        subtitle = QLabel("Clean up laser deposition programs, reviewing every change before it's made.")
+        subtitle.setProperty("role", "dim")
+        subtitle.setFont(theme.ui_font(12))
+
+        drop = QFrame()
+        drop.setObjectName("card")
+        drop.setMinimumSize(460, 170)
+        drop_layout = QVBoxLayout(drop)
+        drop_layout.setSpacing(10)
+        hint = QLabel("Drop a .ptp program here")
+        hint.setFont(theme.ui_font(13, bold=True))
+        or_label = QLabel("or")
+        or_label.setProperty("role", "faint")
+        open_button = QPushButton("Choose a file…")
         open_button.setProperty("primary", True)
         open_button.clicked.connect(window.open_dialog)
+        drop_layout.addStretch(1)
+        for w in (hint, or_label, open_button):
+            drop_layout.addWidget(w, 0, Qt.AlignHCenter)
+        drop_layout.addStretch(1)
+
         self.recent_box = QVBoxLayout()
+        self.recent_box.setSpacing(0)
         layout = QVBoxLayout(self)
         layout.addStretch(1)
         layout.addWidget(title, 0, Qt.AlignHCenter)
-        layout.addWidget(blurb, 0, Qt.AlignHCenter)
-        layout.addSpacing(12)
-        layout.addWidget(open_button, 0, Qt.AlignHCenter)
-        layout.addSpacing(18)
+        layout.addWidget(subtitle, 0, Qt.AlignHCenter)
+        layout.addSpacing(26)
+        layout.addWidget(drop, 0, Qt.AlignHCenter)
+        layout.addSpacing(22)
         layout.addLayout(self.recent_box)
         layout.addStretch(2)
 
@@ -87,10 +115,27 @@ class Welcome(QWidget):
         self.recent_box.addWidget(heading, 0, Qt.AlignHCenter)
         for path in paths:
             button = QPushButton(Path(path).name)
+            button.setProperty("flat", True)
             button.setToolTip(path)
-            button.setFlat(True)
             button.clicked.connect(lambda _=False, p=path: self.window_.open_file(p))
             self.recent_box.addWidget(button, 0, Qt.AlignHCenter)
+
+
+SHORTCUTS = [
+    ("Ctrl+O", "Open a program"),
+    ("Ctrl+S", "Save the fixed file"),
+    ("Ctrl+Enter", "Apply the current step"),
+    ("Alt+←", "Back one step"),
+    ("J / K", "Next / previous change"),
+    ("Space", "Tick or untick the selected changes"),
+    ("A / R", "Tick / untick every change"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+M", "Material database"),
+    ("F", "Fit the plan view (when it has focus)"),
+    ("Mouse", "Plan: wheel zooms, right/middle-drag pans, drag a box to select"),
+    ("Mouse", "3D: drag orbits, Ctrl/middle-drag pans, wheel zooms, click selects"),
+    ("SpaceMouse", "Moves the plan or 3D view; button 1 fits, button 2 shows/hides travel"),
+]
 
 
 class MainWindow(QMainWindow):
@@ -121,12 +166,14 @@ class MainWindow(QMainWindow):
         self.map_tabs.addTab(self.view3d, "3D")
         self.map_and_code.addWidget(self.map_tabs)
         self.map_and_code.addWidget(self.code)
+        self.map_and_code.setHandleWidth(1)
         self.map_and_code.setStretchFactor(0, 1)
         self.map_and_code.setStretchFactor(1, 1)
         self.map_and_code.setSizes([600, 600])  # until the saved layout says otherwise
         self.top = QStackedWidget()
         self.top.addWidget(self.map_and_code)
         self.top.addWidget(self.diff)
+        self.top_card = card(self.top)
 
         self.checklist = ChecklistPanel(self.undo)
         self.recipes = RecipesPanel(self.undo)
@@ -135,41 +182,61 @@ class MainWindow(QMainWindow):
         for panel in (self.checklist, self.recipes, self.final):
             self.panels.addWidget(panel)
 
-        nav = QHBoxLayout()
-        self.apply_button = QPushButton("Apply step  (Ctrl+Enter)")
+        # The step's buttons, in a bar beneath the review card.
+        self.step_label = QLabel()
+        self.step_label.setProperty("role", "dim")
+        self.apply_button = QPushButton("Apply step")
         self.apply_button.setProperty("primary", True)
+        self.apply_button.setToolTip("Apply the ticked changes and move on (Ctrl+Enter)")
         self.skip_button = QPushButton("Skip")
-        self.back_button = QPushButton("← Back")
-        nav.addWidget(self.apply_button)
-        nav.addWidget(self.skip_button)
-        nav.addWidget(self.back_button)
+        self.skip_button.setToolTip("Move on without changing anything")
+        self.back_button = QPushButton("Back")
+        self.back_button.setToolTip("Undo the previous step (Alt+←)")
+        nav = QHBoxLayout()
+        nav.setContentsMargins(4, 0, 0, 0)
+        nav.addWidget(self.step_label)
         nav.addStretch(1)
+        nav.addWidget(self.back_button)
+        nav.addWidget(self.skip_button)
+        nav.addSpacing(4)
+        nav.addWidget(self.apply_button)
+        panels_card = card(self.panels, margin=14)
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
-        bottom_layout.addWidget(self.panels, 1)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(10)
+        bottom_layout.addWidget(panels_card, 1)
         bottom_layout.addLayout(nav)
 
         self.splitter = QSplitter(Qt.Vertical)
-        self.splitter.addWidget(self.top)
+        self.splitter.addWidget(self.top_card)
         self.splitter.addWidget(bottom)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
+        self.splitter.setHandleWidth(12)
         self.central.addWidget(self.welcome)
         self.central.addWidget(self.splitter)
-        self.setCentralWidget(self.central)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 6, 14, 10)
+        content_layout.addWidget(self.central)
 
-        # Steps dock.
+        # Sidebar beside the content.
         self.steps = StepsPanel()
-        dock = QDockWidget("Steps", self)
-        dock.setObjectName("steps")
-        dock.setWidget(self.steps)
-        dock.setFeatures(QDockWidget.DockWidgetMovable)
-        dock.setMinimumWidth(330)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self.steps.setMinimumWidth(270)
+        self.steps.setMaximumWidth(340)
+        root = QWidget()
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        root_layout.addWidget(self.steps)
+        root_layout.addWidget(content, 1)
+        self.setCentralWidget(root)
 
         self.status = QLabel()
         self.statusBar().addPermanentWidget(self.status)
-        self.statusBar().showMessage(f"v{__version__} · fixes offered per {settings_path()}")
+        self.statusBar().showMessage(f"LMD Fixer {__version__}")
+        self.statusBar().setToolTip(f"Which fixes are offered is set in {settings_path()}")
 
         self.spacemouse = SpaceMouse(self)
         self.spacemouse.moved.connect(self._space_moved)
@@ -239,15 +306,54 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.act_database)
         self._fill_recent_menu()
 
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction("Keyboard and mouse…", self.show_shortcuts)
+
         toolbar = self.addToolBar("Main")
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
-        for a in (self.act_open, self.act_save, None, self.act_undo, self.act_redo, None,
-                  self.act_back, self.act_skip, self.act_apply, None, self.act_database):
+        toolbar.setFloatable(False)
+        toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
+        # Plain Undo/Redo in the toolbar (the stack's own actions rename
+        # themselves "Undo Tick 2 change(s)" and make the bar jump about);
+        # what they'd undo is in the tooltip.
+        self.tb_undo = QAction("Undo", self)
+        self.tb_undo.triggered.connect(self.undo.undo)
+        self.tb_redo = QAction("Redo", self)
+        self.tb_redo.triggered.connect(self.undo.redo)
+        self.undo.canUndoChanged.connect(self.tb_undo.setEnabled)
+        self.undo.canRedoChanged.connect(self.tb_redo.setEnabled)
+        self.undo.undoTextChanged.connect(lambda t: self.tb_undo.setToolTip(f"Undo {t} (Ctrl+Z)" if t else "Undo"))
+        self.undo.redoTextChanged.connect(lambda t: self.tb_redo.setToolTip(f"Redo {t} (Ctrl+Y)" if t else "Redo"))
+        self.tb_undo.setEnabled(False)
+        self.tb_redo.setEnabled(False)
+        for a in (self.act_open, self.act_save, None, self.tb_undo, self.tb_redo, None, self.act_database):
             if a is None:
                 toolbar.addSeparator()
             else:
                 toolbar.addAction(a)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+        self.theme_buttons = QButtonGroup(self)
+        self.theme_buttons.setExclusive(True)
+        for i, name in enumerate(theme.THEME_NAMES):
+            b = QToolButton()
+            b.setText(name)
+            b.setCheckable(True)
+            b.setProperty("segment", "true")
+            b.setToolTip(f"{name} appearance")
+            if i == 0:
+                b.setProperty("edge", "first")
+            elif i == len(theme.THEME_NAMES) - 1:
+                b.setProperty("edge", "last")
+            self.theme_buttons.addButton(b, i)
+            toolbar.addWidget(b)
+        current = self.settings.value("theme", theme.DEFAULT_THEME)
+        if current not in theme.THEME_NAMES:
+            current = theme.DEFAULT_THEME
+        self.theme_buttons.button(theme.THEME_NAMES.index(current)).setChecked(True)
+        self.theme_buttons.idClicked.connect(lambda i: self.set_theme(theme.THEME_NAMES[i]))
 
     def _wire(self) -> None:
         self.apply_button.clicked.connect(self.apply_step)
@@ -276,15 +382,50 @@ class MainWindow(QMainWindow):
 
     def _restore_layout(self) -> None:
         geometry = self.settings.value("window/geometry")
-        state = self.settings.value("window/state")
         if geometry is not None:
             self.restoreGeometry(geometry)
-        if state is not None:
-            self.restoreState(state)
         for key, splitter in (("window/split_rows", self.splitter), ("window/split_top", self.map_and_code)):
             saved = self.settings.value(key)
             if saved is not None:
                 splitter.restoreState(saved)
+
+    # -- appearance ---------------------------------------------------------------------
+
+    def set_theme(self, name: str) -> None:
+        """Switches the whole app to theme `name` and remembers it."""
+        theme.apply_theme(QApplication.instance(), name)
+        self.settings.setValue("theme", name)
+        button = self.theme_buttons.button(theme.THEME_NAMES.index(theme.current.name))
+        if not button.isChecked():
+            button.setChecked(True)
+        # Widgets that paint with cached theme colours.
+        self.code.refresh_theme()
+        self.map.refresh_theme()
+        self.view3d.refresh_theme()
+        self.diff.viewport().update()
+        self.steps.show_status(*self._step_statuses())
+        self._choices_changed()
+
+    def _readable_summaries(self) -> list[str]:
+        """Each step's summary, led by the fix's name rather than its id."""
+        out = []
+        for fid, text in zip(self.session.fix_ids, self.session.summaries):
+            prefix = f"[{fid}] "
+            rest = text[len(prefix):] if text.startswith(prefix) else text
+            out.append(f"{self.session.fix_label(fid)} — {rest}")
+        return out
+
+    def _step_statuses(self) -> tuple[tuple[str, ...], dict[str, str]]:
+        if self.session is None:
+            return (), {}
+        return self.session.fix_ids, {fid: self.session.step_status(i) for i, fid in enumerate(self.session.fix_ids)}
+
+    def show_shortcuts(self) -> None:
+        rows = "".join(
+            f"<tr><td style='padding:4px 18px 4px 0'><b>{k}</b></td><td style='padding:4px 0'>{v}</td></tr>"
+            for k, v in SHORTCUTS
+        )
+        QMessageBox.information(self, "Keyboard and mouse", f"<table>{rows}</table>")
 
     # -- SpaceMouse -------------------------------------------------------------------
 
@@ -314,7 +455,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self.spacemouse.stop()
         self.settings.setValue("window/geometry", self.saveGeometry())
-        self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("window/split_rows", self.splitter.saveState())
         self.settings.setValue("window/split_top", self.map_and_code.saveState())
         super().closeEvent(event)
@@ -448,8 +588,11 @@ class MainWindow(QMainWindow):
             self._enable(has_file=False)
             return
         self.central.setCurrentWidget(self.splitter)
-        statuses = {fid: session.step_status(i) for i, fid in enumerate(session.fix_ids)}
-        self.steps.show_status(session.fix_ids, statuses)
+        self.steps.show_status(*self._step_statuses())
+        n = len(session.fix_ids)
+        self.step_label.setText(
+            "Review complete" if session.finished else f"Step {session.index + 1} of {n}"
+        )
         self.status.setText(
             f"{session.original.source_name} · {len(session.original.lines):,} lines uploaded · "
             f"{len(session.current.lines):,} now"
@@ -460,7 +603,7 @@ class MainWindow(QMainWindow):
             self.diff.set_rows(diff_rows(session.original.lines, session.current.lines))
             self.panels.setCurrentWidget(self.final)
             self.final.show_result(len(session.original.lines), len(session.current.lines),
-                                   session.summaries, self.output_name)
+                                   self._readable_summaries(), self.output_name)
             self._name_edited(self.output_name)
         else:
             self.top.setCurrentWidget(self.map_and_code)
@@ -491,8 +634,9 @@ class MainWindow(QMainWindow):
         self.back_button.setEnabled(can_back)
         self.act_restart.setEnabled(can_back)
         self.act_save.setEnabled(has_file and session is not None and session.finished)
-        for widget in (self.apply_button, self.skip_button, self.back_button):
-            widget.setVisible(has_file)
+        for widget in (self.apply_button, self.skip_button):
+            widget.setVisible(reviewing)
+        self.back_button.setVisible(has_file)
 
     # -- linking the map, the code and the step list -------------------------------
 
@@ -529,7 +673,7 @@ class MainWindow(QMainWindow):
                 styles[change.original_index] = ToolpathStyle(
                     colour=theme.REMOVAL_GONE if gone else theme.REMOVAL_KEPT,
                     width=2.0, dashed=gone, label="✕" if gone else "", label_bold=gone,
-                    tint=QColor(208, 59, 59, 40) if gone else None,
+                    tint=QColor(208, 59, 59, 34) if gone else None,
                 )
                 tips[change.original_index] = "Will be removed" if gone else "Kept"
         elif mode == "recipes":

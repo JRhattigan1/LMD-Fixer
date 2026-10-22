@@ -31,18 +31,28 @@ def _fmt(colour: str, bold: bool = False, italic: bool = False) -> QTextCharForm
 
 
 class GCodeHighlighter(QSyntaxHighlighter):
-    """G/M codes, feeds, recipe numbers, comments and section markers."""
+    """G/M codes, feeds, recipe numbers, comments and section markers, in
+    the current theme's code colours (`reload` after a theme change)."""
 
-    RULES = [
-        (re.compile(r"\bG\d+(?:\.\d+)?", re.I), _fmt("#6cb6ff")),
-        (re.compile(r"\bM\d+", re.I), _fmt("#d2a8ff")),
-        (re.compile(r"\bF[-+]?(?:\d+\.?\d*|\.\d+)", re.I), _fmt("#ffb86b")),
-        (re.compile(r"\bP\d+", re.I), _fmt("#7ee787")),
-        (re.compile(r"\bO\d+", re.I), _fmt(theme.ACCENT, bold=True)),
+    PATTERNS = [
+        (re.compile(r"\bG\d+(?:\.\d+)?", re.I), "SYN_G", False),
+        (re.compile(r"\bM\d+", re.I), "SYN_M", False),
+        (re.compile(r"\bF[-+]?(?:\d+\.?\d*|\.\d+)", re.I), "SYN_F", False),
+        (re.compile(r"\bP\d+", re.I), "SYN_P", False),
+        (re.compile(r"\bO\d+", re.I), "SYN_O", True),
     ]
-    COMMENT = (re.compile(r"\([^)]*\)"), _fmt(theme.DIM, italic=True))
-    MARKER = _fmt(theme.ACCENT, bold=True)
-    SKIP = _fmt(theme.DIM)
+    COMMENT_RE = re.compile(r"\([^)]*\)")
+
+    def __init__(self, document) -> None:
+        super().__init__(document)
+        self.reload()
+
+    def reload(self) -> None:
+        self.RULES = [(rx, _fmt(getattr(theme, token), bold=bold)) for rx, token, bold in self.PATTERNS]
+        self.COMMENT = (self.COMMENT_RE, _fmt(theme.SYN_COMMENT, italic=True))
+        self.MARKER = _fmt(theme.SYN_MARKER, bold=True)
+        self.SKIP = _fmt(theme.FAINT)
+        self.rehighlight()
 
     def highlightBlock(self, text: str) -> None:
         if SECTION_MARKER_RE.match(text.strip()):
@@ -178,6 +188,12 @@ class GCodeView(QPlainTextEdit):
                     block = block.next()
         self.setExtraSelections(selections)
 
+    def refresh_theme(self) -> None:
+        self.highlighter.reload()
+        self._refresh_selections()
+        self._gutter.update()
+        self.viewport().update()
+
     # -- navigation ------------------------------------------------------------
 
     def go_to_line(self, line: int) -> None:
@@ -247,7 +263,7 @@ class GCodeView(QPlainTextEdit):
 
     def paint_gutter(self, event) -> None:
         painter = QPainter(self._gutter)
-        painter.fillRect(event.rect(), QColor(theme.PANEL))
+        painter.fillRect(event.rect(), QColor(theme.CARD))
         block = self.firstVisibleBlock()
         number = block.blockNumber()
         top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
@@ -262,9 +278,9 @@ class GCodeView(QPlainTextEdit):
                     c = self._changes[pos]
                     colour = theme.REMOVE_MARK if c.kind == "removed" else theme.MODIFY_MARK
                     if not self._accepted(c.original_index):
-                        colour = QColor(theme.DIM)
+                        colour = QColor(theme.FAINT)
                     painter.fillRect(0, top, 3, bottom - top, colour)
-                painter.setPen(QColor(theme.TEXT if number == current else "#5d6470"))
+                painter.setPen(QColor(theme.TEXT if number == current else theme.FAINT))
                 painter.drawText(0, top, width - 6, height, Qt.AlignRight, str(number + 1))
             block = block.next()
             top = bottom

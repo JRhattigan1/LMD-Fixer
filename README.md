@@ -83,8 +83,18 @@ It covers everything the browser version does:
 - The material database (Tools → Material database, Ctrl+M).
 - The final diff and save.
 
+It has three looks: **Dark** (the default), **Light** and a colourful
+**Vivid**. Switch between them with the control at the right of the
+toolbar; your choice is remembered.
+
+A 3Dconnexion **SpaceMouse** moves whichever view is showing. In 3D, twist
+and tilt orbit, slide and lift pan, and push/pull zooms. On the plan
+view, slide pans and push/pull zooms. Button 1 fits the view and button 2
+shows or hides travel moves. It reads the device directly, so it works
+with 3DxWare running.
+
 Selecting on the map, in the list or in the code selects the same thing
-everywhere. Keys:
+everywhere. Help → Keyboard and mouse lists every shortcut. Keys:
 
 - J/K move between changes.
 - Space (or double-clicking a toolpath on the map) flips the selected rows.

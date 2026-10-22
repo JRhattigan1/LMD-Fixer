@@ -29,6 +29,8 @@ from lmd_fixer.review import ReviewSession
 
 COLUMNS = ["", "Line", "Toolpath", "Part", "Change", "Why"]
 CHANGE_COLUMN = 4
+KEYS = ("J/K move between changes · Space or double-click flips the selected rows · "
+        "A/R tick or untick all · Ctrl+Z undo")
 
 
 def describe(change: LineChange) -> tuple[str, str]:
@@ -64,9 +66,10 @@ class ChecklistPanel(QWidget):
         self._filling = False
 
         self.header = StepHeader()
-        self.summary = QLabel()
         self.accept_all = QPushButton("Tick all")
         self.reject_all = QPushButton("Untick all")
+        for b in (self.accept_all, self.reject_all):
+            b.setProperty("flat", True)
         self.count = QLabel()
         self.count.setProperty("role", "dim")
         self.accept_all.clicked.connect(lambda: self.set_all(True))
@@ -79,28 +82,25 @@ class ChecklistPanel(QWidget):
         self.tree.setHeaderLabels(COLUMNS)
         self.tree.setRootIsDecorated(False)
         self.tree.setUniformRowHeights(True)
-        self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setToolTip(KEYS)
         self.tree.header().setSectionResizeMode(CHANGE_COLUMN, QHeaderView.Stretch)
         self.tree.header().setStretchLastSection(False)
-        self.tree.setFont(theme.code_font())
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.itemSelectionChanged.connect(self._selection_changed)
         self.tree.itemDoubleClicked.connect(lambda *_: self.toggle_selected())
 
         bar = QHBoxLayout()
-        bar.addWidget(self.accept_all)
-        bar.addWidget(self.reject_all)
-        bar.addSpacing(12)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.addWidget(self.count)
         bar.addStretch(1)
-        self.hint = QLabel()
-        self.hint.setProperty("role", "dim")
-        bar.addWidget(self.hint)
+        bar.addWidget(self.accept_all)
+        bar.addWidget(self.reject_all)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
         layout.addWidget(self.header)
-        layout.addWidget(self.summary)
         layout.addLayout(bar)
         layout.addWidget(self.tree, 1)
 
@@ -114,15 +114,12 @@ class ChecklistPanel(QWidget):
         result = session.proposal()
         self.changes = result.changes
         self.header.show_fix(fix.label, fix.description)
-        self.summary.setText(result.summary)
         sections = fix.review_mode == "sections"
         self.accept_all.setText("Remove all" if sections else "Tick all")
         self.reject_all.setText("Keep all" if sections else "Untick all")
-        self.hint.setText(
-            ("Ticked = removed. " if sections else "")
-            + "J/K move · Space or double-click toggles the selected · A/R all · Ctrl+Z undo"
-        )
+        self.tree.setToolTip(("Ticked sections are removed. " if sections else "") + KEYS)
         parts = part_of_change or {}
+        code = theme.code_font()
         self._filling = True
         # Silent while refilling: clear() reports the selection as it removes
         # rows, with positions that belong to the previous step's changes.
@@ -133,11 +130,17 @@ class ChecklistPanel(QWidget):
             item = QTreeWidgetItem(["", where, change.label or "", parts.get(change.original_index, ""),
                                     what, change.reason or ""])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            # Set explicitly: a row only shows a tick box once its check
+            # state has been set, and refresh() skips rows already in the
+            # (default) unticked state, so unticked rows had no box at all.
+            item.setCheckState(0, Qt.Unchecked)
             item.setData(0, Qt.UserRole, pos)
+            item.setFont(CHANGE_COLUMN, code)
             self.tree.addTopLevelItem(item)
         self.tree.blockSignals(False)
         self._filling = False
         self.tree.setColumnHidden(3, not parts)
+        self.tree.setColumnHidden(5, not any(c.reason for c in self.changes))
         self.refresh()
         for col in (0, 1, 2, 3, 5):
             self.tree.resizeColumnToContents(col)
@@ -158,8 +161,11 @@ class ChecklistPanel(QWidget):
         n = len(self.session.accepted_indices()) if self.changes else 0
         removed_lines = sum(c.end_index - c.original_index + 1 for c in self.changes
                             if self.session.is_accepted(c.original_index))
-        noun = "section(s) to remove" if self.session.fix.review_mode == "sections" else "change(s) ticked"
-        self.count.setText(f"{n} of {len(self.changes)} {noun} · {removed_lines:,} line(s) affected")
+        if not self.changes:
+            self.count.setText("Nothing to change in this step.")
+        else:
+            noun = "sections to remove" if self.session.fix.review_mode == "sections" else "changes ticked"
+            self.count.setText(f"<b>{n}</b> of {len(self.changes)} {noun} · {removed_lines:,} lines affected")
         self.choicesChanged.emit()
 
     # -- edits (all undoable) ---------------------------------------------------

@@ -33,14 +33,20 @@ from lmd_fixer.desktop import theme
 from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.toolpaths import analyse_toolpaths, group_into_parts, path_points
 
-NEUTRAL = "#6f7d92"  # toolpaths a step has nothing to say about
+
+
+def _alpha(colour: str, alpha: int) -> QColor:
+    c = QColor(colour)
+    c.setAlpha(alpha)
+    return c
+
 BOX_MARGIN_MM = 2.0
 GRID_MM = 50.0
 
 
 @dataclass
 class ToolpathStyle:
-    colour: str = NEUTRAL
+    colour: str = ""  # "" = the theme's neutral colour
     width: float = 1.5
     dashed: bool = False
     label: str = ""
@@ -93,7 +99,7 @@ class _Label(QGraphicsItem):
         if not self.text:
             return
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(39, 43, 51, 225))
+        painter.setBrush(_alpha(theme.CANVAS, 225))
         painter.drawRoundedRect(self._rect, 4, 4)
         painter.setFont(self._font())
         painter.setPen(QColor(theme.FOCUS if self.bold else theme.TEXT))
@@ -119,14 +125,14 @@ class _Box(QGraphicsRectItem):
         if self.tint is not None:
             painter.fillRect(self.rect(), self.tint)
         if selected:
-            painter.fillRect(self.rect(), QColor(255, 255, 255, 30))
+            painter.fillRect(self.rect(), _alpha(theme.TEXT, 30))
         if selected or self.focused or self.hovered:
-            colour = QColor(theme.FOCUS) if (selected or self.focused) else QColor(255, 255, 255, 110)
+            colour = QColor(theme.FOCUS) if (selected or self.focused) else _alpha(theme.TEXT, 110)
             pen = QPen(colour, 2.5 if selected else 1.5)
             if self.focused and not selected:
                 pen.setStyle(Qt.DashLine)
         else:
-            pen = QPen(QColor(255, 255, 255, 26), 1)
+            pen = QPen(_alpha(theme.TEXT, 30), 1)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
@@ -152,7 +158,7 @@ class BedMapView(QGraphicsView):
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
-        self.setBackgroundBrush(QColor(theme.SURFACE))
+        self.setBackgroundBrush(QColor(theme.CANVAS))
         self.setFocusPolicy(Qt.StrongFocus)
         # Panning is by dragging, so scroll bars would only take room.
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -217,6 +223,12 @@ class BedMapView(QGraphicsView):
         self.set_styles({})
         self.fit()
 
+    def refresh_theme(self) -> None:
+        self.setBackgroundBrush(QColor(theme.CANVAS))
+        for item in (*self._boxes.values(), *self._labels.values()):
+            item.update()
+        self.viewport().update()
+
     def has_paths(self) -> bool:
         return bool(self._boxes)
 
@@ -226,7 +238,7 @@ class BedMapView(QGraphicsView):
         default = ToolpathStyle()
         for start, item in self._paths.items():
             style = styles.get(start, default)
-            pen = QPen(QColor(style.colour), style.width)
+            pen = QPen(QColor(style.colour or theme.NEUTRAL), style.width)
             pen.setCosmetic(True)
             pen.setCapStyle(Qt.RoundCap)
             pen.setJoinStyle(Qt.RoundJoin)
@@ -357,7 +369,7 @@ class BedMapView(QGraphicsView):
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
         super().drawBackground(painter, rect)
-        pen = QPen(QColor(255, 255, 255, 14), 0)
+        pen = QPen(_alpha(theme.TEXT, 16), 0)
         painter.setPen(pen)
         left = int(rect.left() // GRID_MM) * GRID_MM
         top = int(rect.top() // GRID_MM) * GRID_MM
