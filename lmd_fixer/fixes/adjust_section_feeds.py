@@ -367,9 +367,11 @@ def segment_by_geometry(
     the rapids between strokes already dropped, so a raster pad arrives as a
     set of parallel strokes that never join. Taking those for one continuous
     straight is what collapsed every pad of a 17-pad sweep into a single
-    section. And a turn past `corner_deg` is a corner whatever its moves
-    measure, because a corner is defined by its angle and not by the length of
-    what runs into it.
+    section. And a turn past `corner_deg` where the longer of its two moves is
+    at least `corner_min_move` is a corner whatever the radius test says, and
+    is never absorbed into an arc. The length condition is what keeps genuine
+    curves, whose ~0.5 mm chords can turn by 40°+ at a junction, from being
+    shredded into corners.
     """
     n = len(moves)
     if n == 0:

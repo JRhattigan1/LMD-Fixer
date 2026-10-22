@@ -22,7 +22,9 @@ import pandas as pd
 import streamlit as st
 
 from lmd_fixer import __version__
+from lmd_fixer import recipes as recipe_db
 from lmd_fixer.fixes import available_fixes
+from lmd_fixer.fixes.change_recipes import toolpath_recipe_calls
 from lmd_fixer.fixes.adjust_section_feeds import (
     DEFAULT_CHORD_MM,
     RAMP_FEED_STEP,
@@ -578,10 +580,10 @@ REMOVAL_SELECTION = "removal_pick"
 REMOVAL_HOVER = "removal_hover"
 
 
-def toolpath_from_removal_selection(chart_state) -> int | None:
-    """Start line of the toolpath clicked on the removal map, or None for a
-    click on empty space."""
-    picked = _selected_keys(chart_state, REMOVAL_SELECTION, "toolpath")
+def toolpath_from_map_selection(chart_state, name: str = REMOVAL_SELECTION) -> int | None:
+    """Start line of the toolpath clicked on a click-to-tick map (section
+    removal, P recipe change), or None for a click on empty space."""
+    picked = _selected_keys(chart_state, name, "toolpath")
     return int(picked[0]) if picked else None
 
 
@@ -677,6 +679,134 @@ def build_removal_map(
     # much bigger target than a 2px line.
     return (
         alt.layer(paths, crosses, targets)
+        .properties(width=width, height=height)
+        .properties(autosize=alt.AutoSizeParams(type="pad", contains="padding"))
+    )
+
+
+# Unchanged vs new P on the recipe map. Validated as a pair against the app
+# surface (#272b33) with the dataviz skill's validate_palette.py: every check
+# passes, deutan/protan ΔE 27. Still not the only cue — a toolpath with a new P
+# is drawn thicker and its P label is bold, and ticked toolpaths are marked by
+# their box outline, which no colour carries.
+RECIPE_UNCHANGED = "#3987e5"
+RECIPE_CHANGED = "#d95a1d"
+RECIPE_STATUS = ["Unchanged", "New P"]
+RECIPE_SELECTION = "recipe_pick"
+RECIPE_HOVER = "recipe_hover"
+
+
+def build_recipe_map(
+    points: list[dict],
+    labels: dict[int, dict[str, str]],
+    p_label: dict[int, str],
+    changed: set[int],
+    ticked: set[int],
+    size: int = 520,
+) -> alt.LayerChart | None:
+    """Plan view of the bed for the P recipe step, built like the removal map:
+    every toolpath's path (blue if it keeps its P, orange and thicker if it
+    gets a new one), the P it will run written in its box, and a box per
+    toolpath that is the click target. A ticked toolpath's box is outlined.
+
+    `labels` maps a toolpath's start line to its tooltip fields, `p_label` to
+    the short P it will run (e.g. `P31`).
+    """
+    if not points:
+        return None
+    pts = pd.DataFrame(points)[["toolpath", "run", "x", "y"]]
+    pts["x"] = pts["x"].round(3)
+    pts["y"] = pts["y"].round(3)
+    pts["status"] = [RECIPE_STATUS[t in changed] for t in pts["toolpath"]]
+    pts["order"] = range(len(pts))
+
+    boxes = (
+        pts.groupby("toolpath", as_index=False)
+        .agg(x0=("x", "min"), x1=("x", "max"), y0=("y", "min"), y1=("y", "max"))
+    )
+    boxes[["x0", "y0"]] -= 2
+    boxes[["x1", "y1"]] += 2
+    boxes["status"] = [RECIPE_STATUS[t in changed] for t in boxes["toolpath"]]
+    boxes["ticked"] = [t in ticked for t in boxes["toolpath"]]
+    # The box outline marks a ticked toolpath; hover overrides it below.
+    boxes["edge"] = [MAP_FOCUS if t in ticked else "rgba(255,255,255,0.10)" for t in boxes["toolpath"]]
+    boxes["edge_width"] = [2.5 if t in ticked else 1.0 for t in boxes["toolpath"]]
+    boxes["P label"] = [p_label.get(t, "") for t in boxes["toolpath"]]
+    boxes["Click to"] = ["untick it" if t in ticked else "tick it" for t in boxes["toolpath"]]
+    fields = list(next(iter(labels.values()), {}))
+    for name in fields:
+        boxes[name] = [labels.get(t, {}).get(name, "") for t in boxes["toolpath"]]
+    boxes["cx"] = (boxes["x0"] + boxes["x1"]) / 2
+    boxes["cy"] = (boxes["y0"] + boxes["y1"]) / 2
+
+    x_scale, y_scale, width, height = _plan_view(boxes, size)
+    legend = alt.Legend(title=None, orient="top", symbolType="stroke", symbolStrokeWidth=3)
+
+    paths = (
+        alt.Chart(pts)
+        .mark_line(strokeCap="round", strokeJoin="round")
+        .encode(
+            x=alt.X("x:Q", title="X (mm)", scale=x_scale),
+            y=alt.Y("y:Q", title="Y (mm)", scale=y_scale),
+            detail="run:N",
+            order="order:Q",
+            color=alt.Color(
+                "status:N", scale=alt.Scale(domain=RECIPE_STATUS, range=[RECIPE_UNCHANGED, RECIPE_CHANGED]),
+                legend=legend,
+            ),
+            strokeWidth=alt.StrokeWidth(
+                "status:N", scale=alt.Scale(domain=RECIPE_STATUS, range=[1.5, 3]), legend=None
+            ),
+        )
+    )
+
+    # The P each toolpath will run, in text ink rather than the series colour.
+    # Under the boxes, so a click on a label still hits its box.
+    # A pill of surface colour behind each label: the label sits on top of the
+    # toolpath's own lines, which otherwise make it hard to read.
+    backdrop = (
+        alt.Chart(boxes)
+        .mark_point(shape="M-1.6,-0.75H1.6V0.75H-1.6Z", size=420, filled=True, color=MAP_SURFACE, opacity=0.9)
+        .encode(x=alt.X("cx:Q", scale=x_scale), y=alt.Y("cy:Q", scale=y_scale))
+    )
+
+    # Font weight can't be data-driven, so new and unchanged are two layers.
+    def p_text(status: str, colour: str, weight: str) -> alt.Chart:
+        return (
+            alt.Chart(boxes[boxes["status"] == status])
+            .mark_text(fontSize=12, fontWeight=weight, color=colour)
+            .encode(x=alt.X("cx:Q", scale=x_scale), y=alt.Y("cy:Q", scale=y_scale), text="P label:N")
+        )
+
+    pick = alt.selection_point(name=RECIPE_SELECTION, fields=["toolpath"], on="click")
+    hover = alt.selection_point(name=RECIPE_HOVER, fields=["toolpath"], on="pointerover", clear="pointerout")
+    targets = (
+        alt.Chart(boxes)
+        .mark_rect(cornerRadius=4)
+        .encode(
+            x=alt.X("x0:Q", scale=x_scale),
+            x2="x1:Q",
+            y=alt.Y("y0:Q", scale=y_scale),
+            y2="y1:Q",
+            fill=alt.value("#ffffff"),
+            fillOpacity=alt.condition(alt.datum.ticked, alt.value(0.12), alt.value(0.02)),
+            stroke=alt.condition(hover, alt.value(MAP_FOCUS), alt.Stroke("edge:N", scale=None), empty=False),
+            strokeWidth=alt.condition(
+                hover, alt.value(2.5), alt.StrokeWidth("edge_width:Q", scale=None), empty=False
+            ),
+            tooltip=[f"{f}:N" for f in fields] + ["Click to:N"],
+        )
+        .add_params(pick, hover)
+    )
+
+    return (
+        alt.layer(
+            paths,
+            backdrop,
+            p_text(RECIPE_STATUS[0], "#c2c7d1", "normal"),
+            p_text(RECIPE_STATUS[1], MAP_FOCUS, "bold"),
+            targets,
+        )
         .properties(width=width, height=height)
         .properties(autosize=alt.AutoSizeParams(type="pad", contains="padding"))
     )
@@ -1708,6 +1838,371 @@ def render_feed_sections_step(program: GCodeProgram, fix_id: str, fix_index: int
             _go_back()
 
 
+# The material database dialog. None of these keys are accept_*-prefixed: the
+# dialog isn't part of a review, so a review reset mustn't touch it.
+RECIPE_DB_VER = "recipe_db_ver"
+RECIPE_DB_SAVED = "recipe_db_saved"
+ALL_MATERIALS = "All materials"
+
+
+def _materials(db: pd.DataFrame) -> list[str]:
+    return sorted({str(m).strip() for m in db[recipe_db.MATERIAL_COLUMN].dropna() if str(m).strip()})
+
+
+def _open_material_database() -> None:
+    # Every open re-reads the file, so edits made in Excel meanwhile show up.
+    st.session_state[RECIPE_DB_VER] = st.session_state.get(RECIPE_DB_VER, 0) + 1
+
+
+@st.dialog("🧪 Material database", width="large")
+def material_database_dialog() -> None:
+    """View and edit the recipe database: what each M98 P number sets on the
+    control panel. Edits only reach the file on Save, which validates first."""
+    ss = st.session_state
+    try:
+        path = recipe_db.recipes_path()
+        on_disk = recipe_db.load_recipes(path)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    st.caption(
+        "Each **P** number is an LMD recipe stored on the machine's control panel: laser power, powder flow "
+        "and nozzle gas. Record them here as they're set on the machine — nothing checks this against the "
+        "panel. Material and Notes are for your own reference. "
+        f"Saved to `{path}`."
+    )
+
+    # The editor is fed a frame frozen for its key (feeding its own output back
+    # in as `data` makes Streamlit drop edits); the version moves on each open,
+    # save, or "add missing" so the editor rebuilds from the new frame.
+    ver = ss.setdefault(RECIPE_DB_VER, 0)
+    base_key = f"recipe_db_base_{ver}"
+    if base_key not in ss:
+        ss[base_key] = on_disk
+    base: pd.DataFrame = ss[base_key]
+
+    # P numbers the loaded program uses that the database doesn't describe yet.
+    program = ss.get("current_program")
+    if program is not None:
+        known = {int(p) for p in base[recipe_db.P_COLUMN].dropna()}
+        used = sorted({c.p_value for c in toolpath_recipe_calls(program) if c.p_value is not None})
+        missing = [p for p in used if p not in known]
+        if missing:
+            col_note, col_add = st.columns([3, 1], vertical_alignment="center")
+            col_note.info(
+                f"This file uses {len(missing)} recipe(s) not in the database: "
+                + ", ".join(recipe_db.format_p(p) for p in missing)
+            )
+
+            def add_missing(base: pd.DataFrame = base, missing: list[int] = missing, ver: int = ver) -> None:
+                rows = pd.DataFrame({recipe_db.P_COLUMN: missing})
+                ss[f"recipe_db_base_{ver + 1}"] = recipe_db.normalise(pd.concat([base, rows], ignore_index=True))
+                ss[RECIPE_DB_VER] = ver + 1
+
+            col_add.button("Add rows for them", on_click=add_missing, use_container_width=True)
+
+    material = st.selectbox(
+        "Material", [ALL_MATERIALS, *_materials(base)], key="recipe_db_material",
+        help="Show only one material's recipes. New rows added while filtered need their Material typed in.",
+    )
+    mask = (
+        pd.Series(True, index=base.index)
+        if material == ALL_MATERIALS
+        else base[recipe_db.MATERIAL_COLUMN].fillna("").str.strip().eq(material)
+    )
+    number = {
+        col: st.column_config.NumberColumn(col, min_value=0.0, format="%g") for col in recipe_db.NUMERIC_COLUMNS
+    }
+    edited = st.data_editor(
+        base[mask],
+        key=f"recipe_db_editor_{ver}_{material}",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        height=min(440, 38 + 35 * (int(mask.sum()) + 2)),
+        disabled=[recipe_db.UPDATED_COLUMN],
+        column_config={
+            recipe_db.P_COLUMN: st.column_config.NumberColumn(
+                "P", min_value=1, max_value=9999, step=1, format="%04d", required=True,
+                help="Recipe number as set on the control panel — the P of M98 Pxxxx",
+            ),
+            recipe_db.MATERIAL_COLUMN: st.column_config.TextColumn("Material"),
+            **number,
+            recipe_db.NOTES_COLUMN: st.column_config.TextColumn("Notes", width="large"),
+            recipe_db.UPDATED_COLUMN: st.column_config.TextColumn(
+                "Updated", help="Set automatically when a row is added or changed"
+            ),
+        },
+    )
+
+    col_save, col_note = st.columns([1, 3], vertical_alignment="center")
+    col_note.caption("Changes are only kept when you press Save. Close this window to discard them.")
+    if col_save.button("Save", type="primary", use_container_width=True):
+        merged = pd.concat([base[~mask], edited], ignore_index=True)
+        errors = recipe_db.validate_recipes(merged)
+        if errors:
+            st.error("Not saved:\n" + "\n".join(f"- {e}" for e in errors))
+            return
+        try:
+            recipe_db.save_recipes(recipe_db.stamp_changed(merged, on_disk), path)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        ss[RECIPE_DB_SAVED] = f"Saved {len(merged)} recipe(s) to {path.name}."
+        _open_material_database()
+        st.rerun()
+
+
+def render_recipe_step(program: GCodeProgram, fix_id: str, fix_index: int) -> None:
+    """Custom review step for change_recipes, laid out like section removal:
+    the bed map beside a checklist of toolpaths. Tick toolpaths (in the list,
+    or by clicking them on the map), enter a P, and Set gives every ticked
+    toolpath that P; Reset puts them back. Both untick afterwards, so the map
+    then shows the result rather than the selection.
+
+    Nothing changes until a P is set: a recipe change changes what's
+    deposited. Chosen Ps live in `accept_*`-prefixed state keyed by toolpath
+    start line + name, so they're cleared with the rest of the review state
+    and dropped rather than misapplied if an earlier step changes the program.
+    """
+    ss = st.session_state
+    prefix = f"accept_{fix_id}_{fix_index}"
+    choice_state: dict[str, int] = ss.setdefault(f"{prefix}_choice", {})
+
+    calls = toolpath_recipe_calls(program)
+    # What each P is recorded as, for reference only: the step works the same
+    # with an empty database, since the numbers are what the program uses.
+    try:
+        recorded = recipe_db.summaries_by_p(recipe_db.load_recipes())
+    except ValueError as exc:
+        st.warning(f"Material database not read: {exc}")
+        recorded = {}
+
+    def recorded_as(p: int | None) -> str:
+        if p is None:
+            return ""
+        if p not in recorded:
+            return "not in database"
+        return recorded[p] or "in database, no details"
+
+    def tp_key(call) -> str:
+        return f"{call.start_index}:{call.name}"
+
+    changeable = [c for c in calls if c.call_index is not None]
+    key_of = {c.start_index: tp_key(c) for c in changeable}
+    current_p = {c.start_index: c.p_value for c in changeable}
+    for key in [k for k in choice_state if k not in set(key_of.values())]:
+        del choice_state[key]
+
+    def p_text(call, p: int) -> str:
+        return f"P{p:0{call.p_width}d}"
+
+    if not calls:
+        st.success("No named toolpaths found — nothing to change.")
+    else:
+        st.info(
+            "Tick the toolpaths that should run a different recipe — in the list, or by clicking them on the "
+            "map — then enter the new **P** and press **Set**. Every toolpath keeps its current P until you do."
+        )
+
+        tick_key = {c.start_index: f"{prefix}_tick_{c.start_index}" for c in changeable}
+        master_key = f"{prefix}_all"
+        new_p_key = f"{prefix}_newp"
+        need_p_key = f"{prefix}_needp"
+        ticked = {start for start, k in tick_key.items() if ss.get(k)}
+
+        # Bound as defaults: the callbacks outlive this run. Writing the tick
+        # boxes' keys is allowed here because callbacks run before the
+        # widgets are drawn.
+        def apply_to_ticked(
+            p_key: str | None,
+            tick_key: dict = tick_key,
+            master_key: str = master_key,
+            need_p_key: str = need_p_key,
+            key_of: dict = key_of,
+            current_p: dict = current_p,
+            choice_state: dict = choice_state,
+        ) -> None:
+            p = ss.get(p_key) if p_key else None
+            if p_key and p is None:
+                ss[need_p_key] = True
+                return
+            for start, k in tick_key.items():
+                if not ss.get(k):
+                    continue
+                if p is None or int(p) == current_p[start]:
+                    choice_state.pop(key_of[start], None)
+                else:
+                    choice_state[key_of[start]] = int(p)
+                ss[k] = False
+            ss[master_key] = False
+
+        toolpaths = [tp for tp in analyse_toolpaths(program) if tp.start_index in {c.start_index for c in calls}]
+        part_of = {tp.start_index: pt for pt in group_into_parts(toolpaths) for tp in pt.toolpaths}
+        points = path_points(program, toolpaths)
+
+        if points:
+            col_map, col_list = st.columns([3, 2], gap="medium")
+            # A slot, filled after the checklist so the map shows this run's ticks.
+            map_slot = col_map.container()
+        else:
+            col_list = st.container()
+
+        with col_list:
+            col_p, col_set, col_reset = st.columns([2, 1, 1], vertical_alignment="bottom")
+            col_p.number_input(
+                "New P for ticked toolpaths", min_value=1, max_value=9999, step=1, value=None,
+                key=new_p_key, placeholder="e.g. 21",
+            )
+            col_set.button(
+                "Set", type="primary", use_container_width=True, key=f"{prefix}_set",
+                # Not disabled for an empty P box: a typed number only reaches
+                # the app when the box loses focus, which clicking Set does —
+                # disabling on it would leave a dead button under the cursor.
+                disabled=not ticked,
+                on_click=apply_to_ticked, args=(new_p_key,),
+                help="Give every ticked toolpath this P",
+            )
+            col_reset.button(
+                "Reset", use_container_width=True, key=f"{prefix}_reset",
+                disabled=not ticked or not any(key_of[s] in choice_state for s in ticked),
+                on_click=apply_to_ticked, args=(None,),
+                help="Put every ticked toolpath back to its original P",
+            )
+            if ss.pop(need_p_key, False):
+                st.warning("Enter the new P first, then press Set.")
+            # No value= on these: callbacks write their keys, and a keyed
+            # widget given both makes Streamlit warn. They default to False.
+            st.checkbox(
+                "Tick all",
+                key=master_key,
+                on_change=_sync_children_to_master,
+                args=(master_key, list(tick_key.values())),
+            )
+            with st.container(height=470 if points else 440, border=True):
+                for c in calls:
+                    part = part_of.get(c.start_index)
+                    where = f" · {part.name} ({part.where})" if part and part.bounds else ""
+                    if c.call_index is None:
+                        st.checkbox(f"**{c.name}**{where} — no M98 call, can't be changed", value=False,
+                                    disabled=True, key=f"{prefix}_nocall_{c.start_index}")
+                        continue
+                    new = choice_state.get(key_of[c.start_index])
+                    shown = new if new is not None else c.p_value
+                    p_part = (
+                        f"{p_text(c, c.p_value)} → **{p_text(c, new)}**" if new is not None
+                        else p_text(c, c.p_value)
+                    )
+                    st.checkbox(
+                        f"**{c.name}**{where} — {p_part} :gray[{recorded_as(shown)}]",
+                        key=tick_key[c.start_index],
+                    )
+
+        # The ticks as drawn this run — the boxes above may have changed them.
+        ticked = {start for start, k in tick_key.items() if ss.get(k)}
+        if points:
+            # The chart's key carries a version that every click bumps, so it
+            # comes back with an empty selection and the same toolpath can be
+            # clicked again (see the section-removal map).
+            map_ver_key = f"{prefix}_mapver"
+            map_key = f"{prefix}_map_{ss.get(map_ver_key, 0)}"
+
+            def toggle_from_map(
+                map_key: str = map_key,
+                tick_key: dict = tick_key,
+                master_key: str = master_key,
+                map_ver_key: str = map_ver_key,
+            ) -> None:
+                child = tick_key.get(toolpath_from_map_selection(ss.get(map_key), RECIPE_SELECTION))
+                if child is None:
+                    return
+                ss[child] = not ss.get(child, ss.get(master_key, False))
+                ss[map_ver_key] = ss.get(map_ver_key, 0) + 1
+
+            changed = {s for s, k in key_of.items() if k in choice_state}
+            final_p = {s: choice_state.get(key_of[s], current_p[s]) for s in key_of}
+            labels = {
+                c.start_index: {
+                    "Toolpath": c.name,
+                    "Part": (
+                        f"{part_of[c.start_index].name} — {part_of[c.start_index].where}"
+                        if c.start_index in part_of else "—"
+                    ),
+                    "P": (
+                        "no M98 call" if c.call_index is None
+                        else f"{p_text(c, c.p_value)} → {p_text(c, final_p[c.start_index])}"
+                        if c.start_index in changed else p_text(c, c.p_value)
+                    ),
+                    "Settings": recorded_as(final_p.get(c.start_index)),
+                }
+                for c in calls
+            }
+            chart = build_recipe_map(
+                points, labels, {s: f"P{p}" for s, p in final_p.items()}, changed, ticked,
+                size=int(ss.get(MAP_SIZE_KEY, 520)),
+            )
+            with map_slot:
+                st.altair_chart(
+                    chart, key=map_key, on_select=toggle_from_map,
+                    selection_mode=[RECIPE_SELECTION], width="content",
+                )
+                stacked = any(len(pt.toolpaths) > 1 for pt in group_into_parts(toolpaths))
+                st.caption(
+                    "Click a toolpath to tick or untick it. Each box shows the P it will run; orange, thicker "
+                    "and bold = a new P."
+                    + (
+                        " Some toolpaths share a footprint (layers of one build), so only the top one can be "
+                        "clicked there — use the list for the rest."
+                        if stacked else ""
+                    )
+                )
+
+    start_of = {k: s for s, k in key_of.items()}
+    result = run_fix(program, fix_id, {"recipes": {start_of[k]: p for k, p in choice_state.items()}}).result
+
+    if result.changes:
+        st.write(result.summary)
+        key_of_call = {c.call_index: tp_key(c) for c in calls}
+        new_p_of = [choice_state[key_of_call[c.original_index]] for c in result.changes]
+        with st.expander(f"Lines that change ({len(result.changes)})", expanded=False):
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "Line": [c.original_index + 1 for c in result.changes],
+                        "Toolpath": [c.label or "" for c in result.changes],
+                        "Before": [c.original_text.strip() for c in result.changes],
+                        "After": [(c.new_text or "").strip() for c in result.changes],
+                        "New P settings": [recorded_as(p) for p in new_p_of],
+                    }
+                ),
+                hide_index=True,
+                use_container_width=True,
+                height=min(300, 38 + 35 * len(result.changes)),
+            )
+        new_ps = sorted(set(new_p_of))
+        st.warning(
+            "Before running, check on the control panel that "
+            + ("recipe " if len(new_ps) == 1 else "recipes ")
+            + ", ".join(f"P{p:04d}" for p in new_ps)
+            + (" holds" if len(new_ps) == 1 else " hold")
+            + " the laser, powder and nozzle gas settings you want — the program only names the recipe number."
+        )
+    elif calls:
+        st.caption("No P numbers changed; the file will pass through unchanged.")
+
+    col_a, col_b, col_c, _ = st.columns([2, 1, 1, 1])
+    with col_a:
+        if st.button("Apply P changes →", type="primary", use_container_width=True):
+            _apply_and_advance(result.program, f"[{fix_id}] {result.summary}")
+    with col_b:
+        if st.button("Skip fix", use_container_width=True):
+            _advance(f"[{fix_id}] Skipped.")
+    with col_c:
+        if fix_index > 0 and st.button("← Back", use_container_width=True):
+            _go_back()
+
+
 st.set_page_config(page_title="LMD-Fixer", page_icon="🔧", layout="wide")
 inject_css()
 render_hero()
@@ -1721,7 +2216,8 @@ ordered_fix_ids += [fid for fid in fixes if fid not in ordered_fix_ids]
 with st.sidebar:
     st.markdown(f"### <span style='color:{ACCENT}'>&#9881;</span> Fixes", unsafe_allow_html=True)
     st.caption(
-        "Applied in a fixed order — rotary cleanup, section removal, repeated calls, dwell review, feed adjustment."
+        "Applied in a fixed order — rotary cleanup, section removal, recipes, repeated calls, dwell review, "
+        "feed adjustment."
     )
     selected_ids = []
     for fix_id in ordered_fix_ids:
@@ -1731,6 +2227,16 @@ with st.sidebar:
         checked = st.toggle(fix.label or fix_id, help=fix.description, key=FIX_TOGGLE_KEY.format(fix_id))
         if checked:
             selected_ids.append(fix_id)
+    st.divider()
+    # Rendered before the no-upload st.stop() below, so the database can be
+    # looked after without a program loaded.
+    if st.button(
+        "🧪 Material database", use_container_width=True, on_click=_open_material_database,
+        help="What each recipe number (M98 Pxxxx) sets on the control panel",
+    ):
+        material_database_dialog()
+    if saved := st.session_state.pop(RECIPE_DB_SAVED, None):
+        st.toast(saved)
     # Says which file to edit, since a packaged build reads one beside the .exe
     # rather than the copy in the package.
     st.caption(
@@ -1868,6 +2374,10 @@ if fix_index < len(selected_ids):
         # Proposes nothing until the user configures parts/feeds, so it gets
         # its own editor instead of the "no changes" / checklist branches.
         render_feed_sections_step(current_program, fix_id, fix_index)
+    elif fix_id == "change_recipes":
+        # Also proposes nothing until a P number is entered, so it too must stay
+        # ahead of the "no changes" branch.
+        render_recipe_step(current_program, fix_id, fix_index)
     elif not result.changes:
         st.success("No changes proposed by this fix — nothing to review.")
         col_a, col_b, _ = st.columns([1, 1, 2])
@@ -1944,7 +2454,7 @@ if fix_index < len(selected_ids):
                 map_ver_key: str = map_ver_key,
             ) -> None:
                 ss = st.session_state
-                child = keys.get(toolpath_from_removal_selection(ss.get(map_key)))
+                child = keys.get(toolpath_from_map_selection(ss.get(map_key)))
                 if child is None:
                     return
                 ss[child] = not ss.get(child, ss.get(master, False))

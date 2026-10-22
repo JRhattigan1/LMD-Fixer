@@ -36,6 +36,16 @@ Open "fix_settings.toml" (in this folder) in Notepad. Set a fix to false to
 hide it, or true to show it, then save and refresh the browser tab.
 
 
+The material database
+---------------------
+"Material database" in the app's sidebar records what each recipe number
+(the P in M98 Pxxxx) sets on the control panel. It's saved as recipes.csv in
+%APPDATA%\LMD-Fixer, not in this folder, so unzipping a newer version of the
+app keeps it. You can open it in Excel too, but close it there before saving
+from the app. To keep it somewhere else (e.g. a shared OneDrive folder), set
+the path under [database] in fix_settings.toml.
+
+
 Something went wrong?
 ---------------------
 If the app won't start, the console window stays open and shows the error.

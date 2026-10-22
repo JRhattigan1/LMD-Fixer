@@ -2,7 +2,9 @@
 
 Each fix is a small, independent, composable transformation over a
 GCodeProgram. To add a new fix: create a module in this package that
-defines a subclass of Fix and decorate it with @register.
+defines a subclass of Fix decorated with @register, import that module at
+the bottom of this file, and add its id to `pipeline.FIX_ORDER` if it has to
+run at a particular point.
 """
 
 from __future__ import annotations
@@ -40,11 +42,15 @@ ChangeKind = Literal["removed", "modified"]
 
 @dataclass
 class LineChange:
-    """One reviewable change made by a fix, referring to a line (or line range) in the *original* program.
+    """One reviewable change made by a fix, referring to a line (or line range)
+    in the program that was handed to *this* fix — not the original upload,
+    since earlier fixes may already have removed lines.
 
     For single-line changes, end_index defaults to original_index. For a
     multi-line change (e.g. removing a whole named section), end_index is
-    the last original line index included in the change, inclusive.
+    the last line index included in the change, inclusive. A "modified"
+    change's new_text may hold several `\\n`-joined lines (a move split into
+    chords); `pipeline.apply_accepted_changes` splits them back out.
     """
 
     kind: ChangeKind
@@ -112,6 +118,7 @@ __all__ = [
 # Import fix modules so their @register decorators run.
 # (example_fix is an unregistered template and deliberately not imported.)
 from lmd_fixer.fixes import adjust_section_feeds  # noqa: E402,F401
+from lmd_fixer.fixes import change_recipes  # noqa: E402,F401
 from lmd_fixer.fixes import remove_dwells  # noqa: E402,F401
 from lmd_fixer.fixes import remove_named_sections  # noqa: E402,F401
 from lmd_fixer.fixes import remove_repeated_p_calls  # noqa: E402,F401

@@ -8,13 +8,16 @@ from lmd_fixer.fixes import FixResult, available_fixes
 from lmd_fixer.gcode import GCodeProgram
 
 # Fixed run order: rotary table cleanup, then optional named-section removal,
-# then repeated M98/M325 program calls are collapsed, and only then are the
-# surviving G4 X25.00 dwells (genuine P-value changes) put up for manual review.
-# Feed adjustment runs last so it only divides toolpaths that survived removal.
+# then recipe numbers (P values) are changed on the toolpaths that are left. Only
+# then are repeated M98/M325 program calls collapsed — that compares P values,
+# so it has to see the final ones — and the surviving G4 X25.00 dwells
+# (genuine P-value changes) put up for manual review. Feed adjustment runs
+# last so it only divides toolpaths that survived removal.
 # The UI runs fixes in this order whatever order they're ticked in.
 FIX_ORDER = [
     "remove_rotary_table",
     "remove_named_sections",
+    "change_recipes",
     "remove_repeated_p_calls",
     "remove_dwells",
     "adjust_section_feeds",
@@ -46,7 +49,8 @@ def run_fix(program: GCodeProgram, fix_id: str, options: dict | None = None) -> 
 
 
 def run_pipeline(program: GCodeProgram, fix_ids: list[str], options: dict | None = None) -> PipelineResult:
-    """Runs every fix unconditionally, with no review step. Kept for scripting/CLI use."""
+    """Runs every fix unconditionally, with no review step. Kept for scripting;
+    neither the UI nor `lmd-fixer --selftest` uses it."""
     options = options or {}
     current = program
     summaries: list[str] = []

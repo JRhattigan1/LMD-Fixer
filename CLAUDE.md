@@ -48,6 +48,18 @@ Longer design notes live in `docs/`:
   the changes the user accepted, handling both single lines and ranges), and
   `run_pipeline` (applies every fix unconditionally with no review — kept for
   scripting, not used by the UI).
+- `lmd_fixer/recipes.py` — the material/recipe database: one CSV row per
+  `M98 Pxxxx` recipe number: the panel settings (laser power, powder flow
+  g/min, nozzle gas) plus Material/Notes, which are operator notes
+  and are kept out of the P-change step's descriptions (`recipe_summary`).
+  Powder flow rpm and carrier and shield gas were dropped (`RETIRED_COLUMNS`, removed on load). It
+  lives at `LMD_FIXER_RECIPES`, else `[database] recipes` in
+  `fix_settings.toml`, else `%APPDATA%\LMD-Fixer\recipes.csv`. It is
+  deliberately not beside the `.exe`, where a new unzipped version would
+  orphan it. Saves are validated, written atomically, and stamp `Updated`.
+  It's edited in the sidebar's `material_database_dialog` (`app.py`), and
+  the P-change step shows what each P is recorded as. Nothing ties it to the
+  machine, so the step never *requires* a P to be in it.
 - `lmd_fixer/settings.py` + `lmd_fixer/fix_settings.toml` — which fixes the
   app offers. Read fresh on every page load; `LMD_FIXER_SETTINGS` overrides
   the path (the Windows build points it beside the `.exe`). Only the menu is
@@ -112,6 +124,21 @@ Longer design notes live in `docs/`:
     following `G4 X25.00` dwell are redundant too. The three lines are
     always consecutive, so `remove_repeated_p_calls` proposes each group as
     a single range `LineChange`, not three separate ones.
+  - The P of `M98 Pxxxx` is an LMD **recipe** stored on the control panel
+    (laser power, powder flow, nozzle gas). The file only names the number;
+    `recipes.py` records what each one sets, by hand. P is typed as a
+    number rather than picked from the database, because the database
+    isn't the machine and may be incomplete. Every toolpath sets P once, in its header before the
+    laser comes on. `change_recipes` rewrites only those digits, keeping `/`
+    and the zero-padding, and never inserts a call into a toolpath that lacks
+    one. It sits **before** `remove_repeated_p_calls` in `FIX_ORDER`, since
+    that compares P values. A P changed after the collapse would leave a
+    collapsed toolpath silently inheriting its neighbour's recipe. Like
+    `adjust_section_feeds` it proposes nothing without options, so its UI
+    branch (`render_recipe_step`) must stay ahead of the "no changes" branch.
+    Nothing changes until a P is set. Next planned use of the database:
+    a dwell after a recipe change whose powder flow differs must stay, to
+    let the flow settle.
   - `G4 X25.00` after a *genuine* P-value change is a dwell whose necessity
     depends on machine/program specifics not recoverable from the file, so
     it's always left to manual review, never auto-removed. A dwell is
@@ -189,21 +216,43 @@ are in `docs/feed-adjustment-design.md`.
   changes nothing and never fires. Its kept/to-remove colours were validated
   as a pair; to-remove is also dashed, tinted and marked ✕, so it never rests
   on colour alone.
+- **P recipe map** (`build_recipe_map`, `render_recipe_step`) is built the
+  same way: a click toggles the toolpath's tick in `on_select` and bumps
+  `{prefix}_mapver`; both maps read clicks through
+  `toolpath_from_map_selection`. Set/Reset act on the ticked toolpaths and
+  then untick them, so the map shows the result rather than the selection.
+  Two things here are deliberate:
+  - The tick boxes have no `value=`, since callbacks write their keys and
+    Streamlit warns about a keyed widget given both.
+  - **Set is not disabled while the P box is empty.** A typed number only
+    reaches the app when the box loses focus, and clicking Set is what does
+    that. Disabling on it left a dead button under the cursor. The callback
+    warns instead.
+
+  Unchanged/new-P colours (`#3987e5`/`#d95a1d`) were validated as a pair.
+  New P is also drawn thicker with a bold label, and font weight can't be
+  data-driven, so the labels are two layers.
 
 ## Test files
 
-`lmd_fixer/tests/` holds real example files (`O1140 - Original.ptp` is the
-unedited original; `O1140.ptp` is the user's manually-fixed reference version)
-— useful for verifying a fix's output against a known-good target, not just
-for eyeballing regex matches. **Check anything touching segmentation or the
-maps against `O1145.ptp` as well as the O1140 pair**: it is a 17-pad Z-step
-sweep, its pads are rasters rather than contoured coupons, and its layers live
-inside single markers, so it exercises paths O1140 cannot reach. Both of the
-segmentation bugs in the design notes passed on O1140 while making O1145
-useless. These `.ptp` files are git-ignored (proprietary project data, kept
-out of the public repo), so they exist only on the user's machine — a fresh
-clone won't have them. Don't quote identifying content from them (project
-codes, people) in tracked files.
+`lmd_fixer/tests/` holds real example files, useful for verifying a fix's
+output against a known-good target, not just for eyeballing regex matches:
+
+- `O1140 - Original.ptp` (unedited, 45 one-toolpath coupons) and `O1140.ptp`
+  (the user's manually-fixed reference version).
+- `O1140 - Original - 1 path.ptp`: a single toolpath of it, for quick runs.
+- `O1145.ptp`: a 17-pad Z-step sweep, 4 layers per marker block, LF endings.
+- `O1162-AsPosted.ptp` / `O1162-Edited.ptp`: a 2-layer run of the same
+  sweep, unedited and manually fixed, so a second reference pair.
+
+**Check anything touching segmentation or the maps against `O1145.ptp` as
+well as the O1140 pair**: its pads are rasters rather than contoured coupons,
+and its layers live inside single markers, so it exercises paths O1140 cannot
+reach. Both of the segmentation bugs in the design notes passed on O1140 while
+making O1145 useless. These `.ptp` files are git-ignored (proprietary project
+data, kept out of the public repo), so they exist only on the user's machine —
+a fresh clone won't have them. Don't quote identifying content from them
+(project codes, people) in tracked files.
 
 Full-accept of the whole pipeline reproduces the reference except for known
 review-choice differences: the reference keeps all 45 `G90 G0 A0.0` lines and
@@ -253,11 +302,13 @@ snippet (see recent commits for the pattern: `run_fix` then
 for full-accept, or a subset to check partial-accept behaves correctly) and
 sanity-check the before/after line counts and a few sample changes.
 
-Full-pipeline check against the reference: run `FIX_ORDER` accepting every
+Full-pipeline check against the references: run `FIX_ORDER` accepting every
 change **except** in `remove_named_sections`, where accepting everything
 removes all 45 sections and leaves 21 lines. Done that way the result differs
 from `O1140.ptp` by exactly the documented deltas — 45 `G90 G0 A0.0`, 3
-dwells, 6 `M325`, plus blank lines.
+dwells, 6 `M325`, plus blank lines — and from `O1162-Edited.ptp` by only the
+3 genuine-P-change dwells that reference keeps (it removes every
+`G90 G0 A0.0`, unlike `O1140.ptp`).
 
 The UI is reachable headlessly with `streamlit.testing.v1.AppTest`, which is
 worth the setup for changes to either review step that has a map. Two things
@@ -272,6 +323,16 @@ state keeps a frame per `ver`, so read the newest, not the first match.
 Importing `lmd_fixer.app` runs the whole script, so to test one of its pure
 helpers outside AppTest, pull the function out with `ast` rather than
 importing the module.
+
+AppTest also can't drive anything *inside* an `st.dialog`. A click there
+reruns the whole script, the sidebar button that opened the dialog reads
+False, and the dialog vanishes, whereas a real browser reruns only the
+dialog. Test the material database dialog in a browser too, and point
+`LMD_FIXER_RECIPES` at a scratch file so the real database isn't touched.
+Over the DevTools protocol, check for elements with `!!document.querySelector(...)`:
+a returned DOM node serialises to `{}`, which Python reads as false. Table
+cells (`st.data_editor`/`st.dataframe`) are drawn on a canvas, so their text
+isn't in `innerText`.
 
 Chart interaction (`on_select`) can only be checked in a real browser: run a
 dev server, drive headless Edge over the DevTools protocol (`websockets` is

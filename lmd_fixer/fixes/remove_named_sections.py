@@ -1,11 +1,12 @@
 """Lets the user selectively remove named program sections.
 
 Each section is marked by a standalone comment line of the form
-`(SECTION_NAME)` (no spaces/colons inside the parens, distinguishing it from
+`(SECTION_NAME)` (no whitespace inside the parens, distinguishing it from
 free-text header comments like `(PROJECT: ...)`). A section runs from its
 marker line up to, but not including, the next section marker (or end of
-file). Every section is proposed for removal by default so the reviewer
-can toggle individual ones to keep.
+file). Every section is proposed as one range removal, but unlike the other
+fixes the UI starts with none of them ticked: removing a section drops a
+whole toolpath, so the reviewer opts in per section rather than out.
 
 The trailing end-of-program footer (Z/XY retract via G91 G28, rotary-disable
 G65...P8000/M337, G69/M9, then M30 + %) isn't part of any section's job

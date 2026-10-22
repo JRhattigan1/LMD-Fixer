@@ -1,15 +1,15 @@
 """Removes M98 Pxxxx / M325 pairs (and their dwell) when the P value repeats.
 
-Each layer normally starts with:
+Each toolpath normally starts with:
     /M98 P0020
     /M325
     /G4 X25.00
 Setting the laser program to P0020 again when it is already P0020 is a
 no-op, so if the immediately-preceding M98 call used the same P value, the
-M98 + M325 pair is redundant and removed automatically, along with the
-G4 X25.00 dwell that follows it (since there's no longer a program change to
-wait on). Where the P value actually changes, the M98/M325 pair is left in
-place and the dwell is handled separately by the manual review fix.
+M98 + M325 pair is redundant and proposed for removal (accepted by default),
+along with the G4 X25.00 dwell that follows it (since there's no longer a
+program change to wait on). Where the P value actually changes, the M98/M325
+pair is left in place and the dwell is handled separately by `remove_dwells`.
 """
 
 from __future__ import annotations

@@ -1,11 +1,12 @@
 """Removes rotary table commands: G65 ... P8000 / M337 macro pairs and
 G90 G0 A0.0 axis-zero moves.
 
-The G65/M337 pair appears once per layer:
+The G65/M337 pair appears at the start of every toolpath, and once more in
+the end-of-program footer:
     G65 B0.0 F1000. D1 P8000
     M337
 and G90 G0 A0.0 (zeroing the rotary A axis) appears separately, once per
-layer, shortly after G54. All are unnecessary when the rotary table isn't
+toolpath, right after G54. All are unnecessary when the rotary table isn't
 being used for the job. G90 (absolute mode) is already asserted elsewhere
 in each layer block, so dropping the combined G90 G0 A0.0 line doesn't lose
 that modal state.
