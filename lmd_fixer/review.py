@@ -16,7 +16,7 @@ so its rules live here rather than in widget state:
   program has already been through the earlier fixes, and the step numbers
   no longer line up. `selection_change_discards_work` says whether that would
   throw applied work away, so the UI can ask first.
-- **Option-driven fixes** (`review_mode` "recipes"/"feeds") propose nothing
+- **Option-driven fixes** (`review_mode` "recipes") propose nothing
   until given options, and their changes depend on each other, so applying
   the step takes all of them.
 """
@@ -32,7 +32,7 @@ from lmd_fixer.fixes import Fix, FixResult, available_fixes
 from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.pipeline import FIX_ORDER, apply_accepted_changes, run_fix
 
-OPTION_MODES = {"recipes", "feeds"}
+OPTION_MODES = {"recipes"}
 
 
 def ordered_fix_ids(fix_ids: Iterable[str]) -> tuple[str, ...]:
@@ -124,7 +124,7 @@ class ReviewSession:
         return self._proposal[1]
 
     def set_options(self, **options) -> None:
-        """Replaces the current step's options (for "recipes"/"feeds" fixes)."""
+        """Replaces the current step's options (for option-driven fixes)."""
         self.choices.options = dict(options)
 
     def is_accepted(self, original_index: int) -> bool:

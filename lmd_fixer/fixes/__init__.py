@@ -73,7 +73,7 @@ class FixResult:
     changes: list[LineChange] = field(default_factory=list)
 
 
-ReviewMode = Literal["checklist", "sections", "recipes", "feeds"]
+ReviewMode = Literal["checklist", "sections", "recipes"]
 
 
 class Fix(ABC):
@@ -84,8 +84,8 @@ class Fix(ABC):
     description: str = ""
     # How the fix is reviewed. "checklist" is the generic accept/reject list
     # of its proposed changes; the others are fixes with their own review UI.
-    # "recipes" and "feeds" propose nothing until given options, and their
-    # changes are applied together rather than picked one by one.
+    # "recipes" proposes nothing until given options, and its changes are
+    # applied together rather than picked one by one.
     review_mode: ReviewMode = "checklist"
     # Whether each proposed change starts accepted. Most fixes propose a
     # specific, usually-safe cleanup; one that removes large chunks or whose
@@ -130,7 +130,6 @@ __all__ = [
 
 # Import fix modules so their @register decorators run.
 # (example_fix is an unregistered template and deliberately not imported.)
-from lmd_fixer.fixes import adjust_section_feeds  # noqa: E402,F401
 from lmd_fixer.fixes import change_recipes  # noqa: E402,F401
 from lmd_fixer.fixes import remove_dwells  # noqa: E402,F401
 from lmd_fixer.fixes import remove_named_sections  # noqa: E402,F401

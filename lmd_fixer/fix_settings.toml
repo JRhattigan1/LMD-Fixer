@@ -13,7 +13,6 @@ remove_named_sections = true
 change_recipes = true
 remove_repeated_p_calls = true
 remove_dwells = true
-adjust_section_feeds = false
 
 # Where the material/recipe database is kept. Leave this commented out to use
 # the default, %APPDATA%\LMD-Fixer\recipes.csv. Set it to share one copy

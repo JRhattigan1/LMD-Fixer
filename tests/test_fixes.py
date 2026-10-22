@@ -1,5 +1,4 @@
 from lmd_fixer.fixes import LineChange, FixResult, section_names
-from lmd_fixer.fixes.adjust_section_feeds import densify_ramped_path, parse_split_distances
 from lmd_fixer.fixes.change_recipes import toolpath_recipe_calls
 from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.pipeline import apply_accepted_changes, run_fix
@@ -80,18 +79,14 @@ def test_section_names_tracks_the_enclosing_block(sample_program):
     assert names[sample_program.lines.index("(PATH_B)") + 1] == "PATH_B"
 
 
-def test_parse_split_distances():
-    assert parse_split_distances("20, 100.5") == ([20.0, 100.5], True)
-    assert parse_split_distances("  ") == ([], True)
-    assert parse_split_distances("20, abc") == ([], False)
+def test_toolpaths_parts_and_paths(sample_program):
+    from lmd_fixer.toolpaths import analyse_toolpaths, group_into_parts, path_points
 
-
-def test_densify_adds_vertices_only_inside_ramped_sections():
-    points = [
-        {"toolpath": 0, "section": 1, "run": 1, "x": 0.0, "y": 0.0, "t": 0.0},
-        {"toolpath": 0, "section": 1, "run": 1, "x": 10.0, "y": 0.0, "t": 1.0},
-    ]
-    assert densify_ramped_path(points, {}) == points
-    dense = densify_ramped_path(points, {(0, 1): (500.0, 250.0)})
-    assert len(dense) == 2 + (250 // 25 - 1)
-    assert dense[0] == points[0] and dense[-1] == points[-1]
+    toolpaths = analyse_toolpaths(sample_program)
+    assert [tp.name for tp in toolpaths] == ["PATH_A", "PATH_B", "PATH_C"]
+    a = toolpaths[0]
+    assert a.measured_with_laser and a.length_mm == 40 and a.bounds == (0, 10, 5, 15)
+    assert [p.name for p in group_into_parts(toolpaths)] == ["Part 1", "Part 2", "Part 3"]
+    points = [p for p in path_points(toolpaths) if p["toolpath"] == a.start_index]
+    # The laser-on square only: the rapid in and the plunge aren't drawn.
+    assert [(p["x"], p["y"]) for p in points] == [(0, 5), (0, 15), (10, 15), (10, 5), (0, 5)]

@@ -28,7 +28,6 @@ from lmd_fixer.desktop.final_view import DiffView, FinalPanel
 from lmd_fixer.desktop.recipe_dialog import RecipeDialog
 from lmd_fixer.desktop.gcode_view import GCodeView
 from lmd_fixer.desktop.steps.checklist import ChecklistPanel
-from lmd_fixer.desktop.steps.pending import PendingPanel
 from lmd_fixer.desktop.steps.recipes import RecipesPanel
 from lmd_fixer.desktop.steps_panel import StepsPanel
 from lmd_fixer.export import default_output_name, diff_rows
@@ -122,10 +121,9 @@ class MainWindow(QMainWindow):
 
         self.checklist = ChecklistPanel(self.undo)
         self.recipes = RecipesPanel(self.undo)
-        self.pending = PendingPanel()
         self.final = FinalPanel()
         self.panels = QStackedWidget()
-        for panel in (self.checklist, self.recipes, self.pending, self.final):
+        for panel in (self.checklist, self.recipes, self.final):
             self.panels.addWidget(panel)
 
         nav = QHBoxLayout()
@@ -428,16 +426,12 @@ class MainWindow(QMainWindow):
             self.code.set_lines(session.current.lines)
             self.map.load(session.current)
             mode = session.fix.review_mode
-            if mode in CHECKLIST_MODES:
-                self.panels.setCurrentWidget(self.checklist)
-                self.checklist.load(session, self._part_of_changes(session))
-            elif mode == "recipes":
+            if mode == "recipes":
                 self.panels.setCurrentWidget(self.recipes)
                 self.recipes.load(session, self._part_of_toolpaths())
             else:
-                self.panels.setCurrentWidget(self.pending)
-                self.pending.load(session)
-                self._choices_changed()
+                self.panels.setCurrentWidget(self.checklist)
+                self.checklist.load(session, self._part_of_changes(session))
         self._enable(has_file=True)
 
     def _enable(self, has_file: bool) -> None:

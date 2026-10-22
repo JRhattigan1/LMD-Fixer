@@ -65,7 +65,7 @@ pip install -e .[desktop]
 python -m lmd_fixer.desktop [FILE]
 ```
 
-It covers everything except feed adjustment:
+It covers everything the browser version does:
 
 - Opening files: the File menu, drag and drop, or recent files.
 - The Steps list.
@@ -87,8 +87,7 @@ everywhere. Keys:
 - Ctrl+Z/Ctrl+Y undo and redo.
 - Ctrl+Enter applies the step.
 
-In the P step, select toolpaths, type the P, and press Enter. Feed
-adjustment is still to come.
+In the P step, select toolpaths, type the P, and press Enter.
 
 ## Running from a checkout (development)
 
@@ -115,9 +114,8 @@ files are skipped on machines that don't have them.
    order you switched them on. For most fixes, every proposed change is
    listed individually with a checkbox, ticked by default, so you can
    accept or reject it, plus an "Accept all" shortcut. Section removal
-   starts with nothing ticked, the P recipe step changes nothing until
-   you set a P, and feed adjustment applies its changes as one set. All
-   three show a map of the bed. **Skip fix** moves on without changing
+   starts with nothing ticked, and the P recipe step changes nothing until
+   you set a P. Both show a map of the bed. **Skip fix** moves on without changing
    anything, and **← Back** returns to the previous fix and undoes it.
    Changing which fixes are switched on part-way through restarts the
    review from the original file. Before the first step that just happens.
@@ -172,18 +170,6 @@ Fixes always run in this order, independent of sidebar tick order:
    after step 4 follow a genuine P-value change, so their necessity can't be
    determined from the file alone. Each is proposed for removal along with
    the P value it follows, and you decide per occurrence whether to keep it.
-6. **Adjust feed rate per toolpath section** (`adjust_section_feeds`) —
-   divides each toolpath into sections and lets you set a feed rate for
-   each: a single value, or a ramp from a start feed to an end feed along
-   the section. A toolpath can be divided into equal lengths, at distances
-   you type in, into its straights and arcs, and/or by layer. You pick
-   sections on a map of the bed, which is coloured by the feed each section
-   will run at. Because feed is modal, the original feed is restated wherever
-   a change would otherwise carry over, so these changes are applied together
-   rather than line by line. A ramp can split long straight moves into short
-   chords so the feed has somewhere to change; the chord length is under
-   ⚙ Ramp settings. **Switched off in the shipped `fix_settings.toml`** —
-   set it to `true` to use it (see below).
 
 ## Material database
 
@@ -233,6 +219,7 @@ lmd_fixer/
   gcode.py                      GCodeProgram: load/save, line-based model
   pipeline.py                   FIX_ORDER, run_fix / apply_accepted_changes
   review.py                     ReviewSession: the step-by-step review, UI-free
+  toolpaths.py                  toolpaths, parts and paths for the bed maps
   desktop/                      the desktop app (PySide6), in progress
   export.py                     output name, O-number sync, CRLF save, diff rows
   settings.py                   reads fix_settings.toml
@@ -245,7 +232,6 @@ lmd_fixer/
     change_recipes.py           rewrites each toolpath's M98 recipe number
     remove_repeated_p_calls.py
     remove_dwells.py
-    adjust_section_feeds.py     toolpath analysis, segmentation, feed ramps
     example_fix.py              unregistered template for writing new fixes
   tests/                        real example .ptp files (git-ignored, so
                                 only on machines that have them):
@@ -259,7 +245,6 @@ lmd_fixer/
                                 manually fixed)
 tests/                          pytest suite (python -m pytest)
 docs/
-  feed-adjustment-design.md     why the feed step and the maps work as they do
   height-feedback-brief.md      brief for a separate, not-yet-started project
 packaging/
   build.ps1                     builds the Windows app zip

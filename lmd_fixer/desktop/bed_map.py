@@ -30,8 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from lmd_fixer.desktop import theme
-from lmd_fixer.fixes.adjust_section_feeds import analyse_toolpaths, group_into_parts, path_points
 from lmd_fixer.gcode import GCodeProgram
+from lmd_fixer.toolpaths import analyse_toolpaths, group_into_parts, path_points
 
 NEUTRAL = "#6f7d92"  # toolpaths a step has nothing to say about
 BOX_MARGIN_MM = 2.0
@@ -184,7 +184,7 @@ class BedMapView(QGraphicsView):
         toolpaths = analyse_toolpaths(program)
         part_of = {tp.start_index: pt for pt in group_into_parts(toolpaths) for tp in pt.toolpaths}
         runs: dict[int, dict[int, list[QPointF]]] = defaultdict(lambda: defaultdict(list))
-        for row in path_points(program, toolpaths):
+        for row in path_points(toolpaths):
             runs[row["toolpath"]][row["run"]].append(QPointF(row["x"], row["y"]))
         for tp in toolpaths:
             part = part_of.get(tp.start_index)
