@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +31,7 @@ from lmd_fixer.desktop.gcode_view import GCodeView
 from lmd_fixer.desktop.steps.checklist import ChecklistPanel
 from lmd_fixer.desktop.steps.recipes import RecipesPanel
 from lmd_fixer.desktop.steps_panel import StepsPanel
+from lmd_fixer.desktop.view3d import View3D
 from lmd_fixer.export import default_output_name, diff_rows
 from lmd_fixer.fixes import available_fixes
 from lmd_fixer.fixes.change_recipes import toolpath_recipe_calls
@@ -110,7 +112,13 @@ class MainWindow(QMainWindow):
         self.diff = DiffView()
         self.map_and_code = QSplitter(Qt.Horizontal)
         self.map_and_code.setObjectName("map_and_code")
-        self.map_and_code.addWidget(self.map)
+        # Plan view and 3D share styles and selection; see _show_selection.
+        self.view3d = View3D()
+        self.map_tabs = QTabWidget()
+        self.map_tabs.setObjectName("map_tabs")
+        self.map_tabs.addTab(self.map, "Plan")
+        self.map_tabs.addTab(self.view3d, "3D")
+        self.map_and_code.addWidget(self.map_tabs)
         self.map_and_code.addWidget(self.code)
         self.map_and_code.setStretchFactor(0, 1)
         self.map_and_code.setStretchFactor(1, 1)
@@ -248,6 +256,8 @@ class MainWindow(QMainWindow):
         self.recipes.choicesChanged.connect(self._choices_changed)
         self.map.selectionEdited.connect(self._map_selection_edited)
         self.map.toolpathActivated.connect(self._map_activated)
+        self.view3d.selectionEdited.connect(self._map_selection_edited)
+        self.view3d.toolpathActivated.connect(self._map_activated)
         self.code.lineActivated.connect(self._code_line_activated)
         self.final.nameEdited.connect(self._name_edited)
         self.final.saveRequested.connect(self.save_dialog)
@@ -425,6 +435,7 @@ class MainWindow(QMainWindow):
             self.top.setCurrentWidget(self.map_and_code)
             self.code.set_lines(session.current.lines)
             self.map.load(session.current)
+            self.view3d.load(session.current)
             mode = session.fix.review_mode
             if mode == "recipes":
                 self.panels.setCurrentWidget(self.recipes)
@@ -516,6 +527,7 @@ class MainWindow(QMainWindow):
                 styles[start] = ToolpathStyle(label=f"{n} ✓")
                 tips[start] = f"{n} ticked change(s) in this toolpath"
         self.map.set_styles(styles, tips)
+        self.view3d.set_styles(styles)
 
     def _starts_for_positions(self, positions) -> list[int]:
         changes = self.checklist.changes
@@ -526,16 +538,23 @@ class MainWindow(QMainWindow):
         """The step list's selection moved: follow it on the map and in the code."""
         mode = self._mode()
         if mode in CHECKLIST_MODES:
-            self.map.set_selected(self._starts_for_positions(selection))
+            self._show_selection(self._starts_for_positions(selection))
             if selection:
                 self.code.set_current_change(selection[0])
         elif mode == "recipes":
-            self.map.set_selected(selection)
+            self._show_selection(selection)
             if selection:
                 self.code.go_to_line(selection[0])
 
+    def _show_selection(self, starts) -> None:
+        """Shows the selected toolpaths in both the plan view and 3D."""
+        self.map.set_selected(starts)
+        self.view3d.set_selected(starts)
+
     def _map_selection_edited(self, starts: list) -> None:
-        """Toolpaths picked on the map: select their rows and show the first."""
+        """Toolpaths picked on the plan map or in 3D: select them in the
+        other view and in the list, and show the first in the code."""
+        self._show_selection(starts)
         mode = self._mode()
         if mode in CHECKLIST_MODES:
             wanted = set(starts)
@@ -560,7 +579,7 @@ class MainWindow(QMainWindow):
                 self.checklist.set_indices(indices, not self.session.is_accepted(indices[0]))
         elif mode == "recipes":
             self.recipes.select_starts([start])
-            self.map.set_selected([start])
+            self._show_selection([start])
             self.recipes.new_p.setFocus()
             self.recipes.new_p.selectAll()
 
@@ -569,7 +588,7 @@ class MainWindow(QMainWindow):
         pos = self.code.change_at_line(line)
         if pos is not None and self.panels.currentWidget() is self.checklist:
             self.checklist.select_positions([pos])
-            self.map.set_selected(self._starts_for_positions([pos]))
+            self._show_selection(self._starts_for_positions([pos]))
 
     # -- material database -----------------------------------------------------------
 

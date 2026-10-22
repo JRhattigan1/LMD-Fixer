@@ -41,13 +41,27 @@ _NON_MOTION_G = {4, 10, 28, 30, 52, 65, 92}
 
 
 @dataclass
-class _Move:
+class Move:
+    """One motion line. Rapids (G0) are kept for the 3D view's travel
+    moves; everything else here only uses feed moves."""
+
     index: int
     length: float
     laser_on: bool
     # XY at the start/end of the move; None where the position isn't tracked.
     start_xy: tuple[float, float] | None = None
     end_xy: tuple[float, float] | None = None
+    start_z: float | None = None
+    end_z: float | None = None
+    rapid: bool = False  # G0
+
+    @property
+    def start_xyz(self) -> tuple[float, float, float] | None:
+        return None if self.start_xy is None or self.start_z is None else (*self.start_xy, self.start_z)
+
+    @property
+    def end_xyz(self) -> tuple[float, float, float] | None:
+        return None if self.end_xy is None or self.end_z is None else (*self.end_xy, self.end_z)
 
 
 @dataclass
@@ -59,7 +73,7 @@ class Toolpath:
     measured_with_laser: bool  # False when falling back to all feed moves
     # XY footprint, None for a toolpath whose position isn't trackable.
     bounds: tuple[float, float, float, float] | None = None  # x0, x1, y0, y1
-    moves: list[_Move] = field(default_factory=list, repr=False)  # the measured path
+    moves: list[Move] = field(default_factory=list, repr=False)  # the measured path
 
 
 @dataclass
@@ -151,15 +165,21 @@ def _arc_length(start: tuple[float, float], end: tuple[float, float], clockwise:
     return r * sweep
 
 
-def _parse(lines: list[str]) -> list[_Move]:
+def program_moves(program: GCodeProgram) -> list[Move]:
+    """Every motion line in the program, rapids included, in order.
+    Read-only: the result is cached and shared."""
+    return _parse(program.lines)
+
+
+def _parse(lines: list[str]) -> list[Move]:
     # The UI analyses the same program on every redraw; callers must treat
     # the result as read-only.
     return _parse_cached(tuple(lines))
 
 
 @functools.lru_cache(maxsize=4)
-def _parse_cached(lines: tuple[str, ...]) -> list[_Move]:
-    moves: list[_Move] = []
+def _parse_cached(lines: tuple[str, ...]) -> list[Move]:
+    moves: list[Move] = []
     motion = 0
     absolute = True
     laser_on = False
@@ -204,6 +224,11 @@ def _parse_cached(lines: tuple[str, ...]) -> list[_Move]:
             elif pos[a] is not None:
                 pos[a] = pos[a] + by_letter[a]
 
+        start_xy = (start["X"], start["Y"]) if start["X"] is not None and start["Y"] is not None else None
+        end_xy = (pos["X"], pos["Y"]) if pos["X"] is not None and pos["Y"] is not None else None
+        if motion == 0:
+            moves.append(Move(i, 0.0, laser_on, start_xy, end_xy, start["Z"], pos["Z"], rapid=True))
+            continue
         if motion not in (1, 2, 3):
             continue
         # Moves from an untracked position (e.g. straight after G28) count as
@@ -215,9 +240,7 @@ def _parse_cached(lines: tuple[str, ...]) -> list[_Move]:
             planar = _arc_length((start["X"], start["Y"]), (pos["X"], pos["Y"]), motion == 2, by_letter)
             dz = (pos["Z"] - start["Z"]) if (start["Z"] is not None and pos["Z"] is not None) else 0.0
             length = math.hypot(planar, dz)
-        start_xy = (start["X"], start["Y"]) if start["X"] is not None and start["Y"] is not None else None
-        end_xy = (pos["X"], pos["Y"]) if pos["X"] is not None and pos["Y"] is not None else None
-        moves.append(_Move(i, length, laser_on, start_xy, end_xy))
+        moves.append(Move(i, length, laser_on, start_xy, end_xy, start["Z"], pos["Z"]))
     return moves
 
 
@@ -237,7 +260,8 @@ def analyse_toolpaths(program: GCodeProgram) -> list[Toolpath]:
     move_indices = [m.index for m in all_moves]
     toolpaths: list[Toolpath] = []
     for start, end, name in _toolpath_bounds(program.lines):
-        moves = all_moves[bisect.bisect_left(move_indices, start):bisect.bisect_right(move_indices, end)]
+        moves = [m for m in all_moves[bisect.bisect_left(move_indices, start):bisect.bisect_right(move_indices, end)]
+                 if not m.rapid]
         measured = [m for m in moves if m.laser_on]
         with_laser = bool(measured) and sum(m.length for m in measured) > 0
         if not with_laser:

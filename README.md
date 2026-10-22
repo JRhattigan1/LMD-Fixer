@@ -72,6 +72,11 @@ It covers everything the browser version does:
 - A bed map beside the highlighted program. The map zooms with the wheel,
   pans with a right- or middle-drag, and F fits it to the bed. Click,
   Ctrl-click or drag a box to select toolpaths.
+- A 3D tab beside the plan view: deposition paths at their real height,
+  with travel moves (rapids, plunges, retracts) that can be switched off
+  and a Z stretch to pull stacked layers apart. Drag to orbit,
+  Ctrl- or middle-drag to pan, scroll to zoom. Click a path to select its
+  toolpath, the same as on the plan view.
 - Proposed changes marked on their lines.
 - The accept/reject review with undo.
 - Section removal and P recipe changes on the map.

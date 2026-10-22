@@ -110,6 +110,22 @@ needed; it's in git history (`adjust_section_feeds.py`,
   map colour before using it. A step's toolpaths map to changes through
   `toolpath_at_line`. A section change's `original_index` is its
   toolpath's start line.
+- **3D view** (`desktop/view3d.py`, `View3D`, the "3D" tab beside the plan
+  map): pyqtgraph's `GLViewWidget`. It draws deposition per toolpath at real
+  Z and travel moves (`toolpaths.program_moves`, rapids included), with a
+  travel toggle and a Z stretch. It takes the same `ToolpathStyle`s and
+  selection as the plan map: `MainWindow._show_selection` sets both, and
+  either view's `selectionEdited` goes through `_map_selection_edited`. GL
+  can't do dashes, so state there rests on colour, labels and the
+  selection box. **Picking** is in screen space (`pick_segment`): project
+  every deposition segment with the camera's own matrices and take the
+  nearest within 8 px, nearest-to-camera among near-ties so a stack's top
+  layer wins. It's pure numpy, so it's unit-tested without GL. A click is a
+  press and release under `CLICK_SLOP_PX`; anything longer is an orbit. The
+  GL widget is only created on first show, so tests never touch OpenGL.
+  To look at it, render with the real `windows` platform and
+  `grabFramebuffer()`. The offscreen platform gets a context but produces no
+  image, and `widget.grab()` leaves GL panes blank.
 - **Material database dialog** (`desktop/recipe_dialog.py`): a
   `QStandardItemModel` behind a filter proxy. Cells are text until Save,
   which runs `recipes.validate_recipes` / `stamp_changed` / `save_recipes`.

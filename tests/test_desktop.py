@@ -236,3 +236,47 @@ def test_material_database_dialog(qtbot, tmp_path, monkeypatch):
     assert not d.save()
     assert "must be a number" in d.errors.text()
     d.dirty = False  # skip the unsaved-changes prompt on close
+
+
+# -- the 3D view (data and picking; the GL widget itself isn't created) -----------
+
+def test_3d_view_builds_deposition_and_travel(window, sample_file):
+    window.open_file(str(sample_file))
+    v = window.view3d
+    assert v.gl is None  # only created when the 3D tab is first shown
+    a = start_of(window, "PATH_A")
+    segs = v.deposition[a]
+    assert segs.shape == (4, 2, 3) and set(segs[..., 2].ravel()) == {0.0}  # the square, at Z0
+    assert len(v.travel) > 0 and v.travel[..., 2].max() == 8.0  # retracts to Z8 are travel
+    v.z_scale.setCurrentIndex(2)  # Z x5
+    assert v._scaled(v.travel)[..., 2].max() == 40.0
+
+
+def test_pick_segment_nearest_then_closest_to_camera():
+    import numpy as np
+
+    from lmd_fixer.desktop.view3d import pick_segment
+
+    # Identity "camera": screen x = (x + 1) * 50, y = (1 - y) * 50, depth = z.
+    mvp = np.eye(4)
+    segs = np.array([
+        [[-0.5, 0, 0.5], [0.5, 0, 0.5]],    # toolpath 1, further away
+        [[-0.5, 0, -0.5], [0.5, 0, -0.5]],  # toolpath 2, same place on screen, nearer
+        [[-0.5, 0.6, 0], [0.5, 0.6, 0]],    # toolpath 3, higher up the screen
+    ])
+    owners = np.array([1, 2, 3])
+    assert pick_segment(segs, owners, mvp, 100, 100, 50, 50) == 2
+    assert pick_segment(segs, owners, mvp, 100, 100, 50, 21) == 3
+    assert pick_segment(segs, owners, mvp, 100, 100, 50, 35) is None  # nothing within 8 px
+
+
+def test_selecting_in_3d_selects_on_the_map_and_in_the_list(window, sample_file):
+    window.open_file(str(sample_file))
+    window.apply_step()  # sections
+    b = start_of(window, "PATH_B")
+    window.view3d.selectionEdited.emit([b])
+    assert window.map.selected() == [b]
+    assert [window.checklist.changes[p].label for p in window.checklist.selected_positions()] == ["PATH_B"]
+    # And the other way: the list drives the 3D selection.
+    window.checklist.tree.setCurrentItem(window.checklist.tree.topLevelItem(0))
+    assert window.view3d.selected() == [start_of(window, "PATH_A")]
