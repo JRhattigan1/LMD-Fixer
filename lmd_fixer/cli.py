@@ -123,6 +123,15 @@ def _selftest(args: list[str]) -> int:
             return finish(1)
         say(f"ok   window opens {Path(source).name}: {len(window.session.original.lines):,} lines, "
             f"{len(window.map.info)} toolpaths on the map")
+        # Show the 3D tab, so OpenGL really starts: the frozen app has to
+        # bundle PyOpenGL's platform support for this to work.
+        window.show()
+        window.map_tabs.setCurrentWidget(window.view3d)
+        QApplication.processEvents()
+        if window.view3d.gl is None or not window.view3d._items:
+            say("FAIL the 3D view didn't draw")
+            return finish(1)
+        say(f"ok   3D view draws {len(window.view3d._items)} toolpaths")
         # Through the same state machine the window drives, applying each
         # step with its fix's defaults.
         session = ReviewSession(GCodeProgram.from_file(source), FIX_ORDER)
