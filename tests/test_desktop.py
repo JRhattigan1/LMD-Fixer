@@ -294,3 +294,21 @@ def test_moving_to_a_step_with_fewer_changes_keeps_the_selection_valid(window, s
     window.apply_step()  # sections: only 3 rows
     assert window.checklist.selected_positions() == [0]
     assert window.map.selected() == [start_of(window, "PATH_A")]
+
+
+def test_spacemouse_report_parsing():
+    from lmd_fixer.desktop.spacemouse import Motion, parse_report
+
+    m = Motion()
+    # Report 1: translation x=350, y=-175, z=0 (int16 little-endian).
+    assert parse_report([1, 0x5E, 0x01, 0x51, 0xFF, 0, 0], m) is None
+    assert (m.tx, m.ty, m.tz) == (1.0, -0.5, 0.0)
+    # Report 2: rotation.
+    parse_report([2, 0, 0, 0, 0, 0x5E, 0x01], m)
+    assert m.rz == 1.0
+    # Report 3: buttons.
+    assert parse_report([3, 0b10, 0], m) == 0b10
+    # Newer devices: all six axes in one report 1.
+    parse_report([1] + [0x5E, 0x01] * 6, m)
+    assert (m.tx, m.rz) == (1.0, 1.0)
+    assert Motion().is_idle() and not m.is_idle()

@@ -31,6 +31,7 @@ from lmd_fixer.desktop.gcode_view import GCodeView
 from lmd_fixer.desktop.steps.checklist import ChecklistPanel
 from lmd_fixer.desktop.steps.recipes import RecipesPanel
 from lmd_fixer.desktop.steps_panel import StepsPanel
+from lmd_fixer.desktop.spacemouse import SpaceMouse
 from lmd_fixer.desktop.view3d import View3D
 from lmd_fixer.export import default_output_name, diff_rows
 from lmd_fixer.fixes import available_fixes
@@ -170,6 +171,10 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.status)
         self.statusBar().showMessage(f"v{__version__} · fixes offered per {settings_path()}")
 
+        self.spacemouse = SpaceMouse(self)
+        self.spacemouse.moved.connect(self._space_moved)
+        self.spacemouse.buttonPressed.connect(self._space_button)
+
         self._build_actions()
         self._wire()
         self._load_fix_list()
@@ -281,7 +286,33 @@ class MainWindow(QMainWindow):
             if saved is not None:
                 splitter.restoreState(saved)
 
+    # -- SpaceMouse -------------------------------------------------------------------
+
+    def start_spacemouse(self) -> None:
+        """Opens a SpaceMouse if one is plugged in. Called by `main()`, not
+        the constructor, so tests never grab a real device."""
+        if self.spacemouse.start():
+            self.statusBar().showMessage(f"{self.spacemouse.name} connected — moves the plan and 3D views", 8000)
+
+    def _space_moved(self, motion) -> None:
+        """Moves whichever view is showing, while this window is active."""
+        if not self.isActiveWindow() or self.top.currentWidget() is not self.map_and_code:
+            return
+        if self.map_tabs.currentWidget() is self.view3d:
+            self.view3d.apply_motion(motion)
+        else:
+            self.map.apply_motion(motion)
+
+    def _space_button(self, button: int) -> None:
+        if not self.isActiveWindow():
+            return
+        if button == 0:
+            (self.view3d.fit if self.map_tabs.currentWidget() is self.view3d else self.map.fit)()
+        elif button == 1 and self.map_tabs.currentWidget() is self.view3d:
+            self.view3d.toggle_travel()
+
     def closeEvent(self, event) -> None:
+        self.spacemouse.stop()
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("window/split_rows", self.splitter.saveState())

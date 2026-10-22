@@ -14,8 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # The desktop app (in progress; replaces the Streamlit UI when done).
-desktop = ["PySide6-Essentials>=6.7", "pyqtgraph>=0.13", "PyOpenGL"]
-dev = ["pytest", "pytest-qt", "PySide6-Essentials>=6.7", "pyqtgraph>=0.13", "PyOpenGL"]
+desktop = ["PySide6-Essentials>=6.7", "pyqtgraph>=0.13", "PyOpenGL", "hidapi"]
+dev = ["pytest", "pytest-qt", "PySide6-Essentials>=6.7", "pyqtgraph>=0.13", "PyOpenGL", "hidapi"]
 
 [project.scripts]
 lmd-fixer = "lmd_fixer.cli:main"

@@ -26,6 +26,11 @@ from lmd_fixer.desktop.bed_map import NEUTRAL, ToolpathStyle
 from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.toolpaths import analyse_toolpaths, program_moves
 
+# SpaceMouse response per poll tick at full deflection. Axes (3Dconnexion's
+# raw HID frame): x right, y towards the user, z down; rotations about those.
+SPACE_ORBIT_DEG = 2.5
+SPACE_PAN_PX = 14.0
+SPACE_ZOOM = 0.035
 CLICK_SLOP_PX = 4  # movement below this between press and release is a click
 PICK_TOL_PX = 8
 TRAVEL_RGBA = (0.62, 0.66, 0.72, 0.35)
@@ -322,6 +327,20 @@ class View3D(QWidget):
         extent = float(max(hi[0] - lo[0], hi[1] - lo[1], (hi[2] - lo[2]) * k, 10))
         self.gl.setCameraPosition(pos=centre, distance=extent * 1.25, elevation=35, azimuth=-70)
         self._needs_fit = False
+
+    def apply_motion(self, m) -> None:
+        """Moves the camera from a SpaceMouse `Motion`: twist turns the bed,
+        tilting forward/back changes the viewing angle, sliding pans, lifting
+        or pressing pans up/down, pushing/pulling zooms."""
+        if self.gl is None:
+            return
+        self.gl.orbit(-m.rz * SPACE_ORBIT_DEG, -m.rx * SPACE_ORBIT_DEG)
+        self.gl.pan(m.tx * SPACE_PAN_PX, -m.tz * SPACE_PAN_PX, 0, relative="view")
+        self.gl.opts["distance"] = max(1.0, self.gl.opts["distance"] * (1 + m.ty * SPACE_ZOOM))
+        self.gl.update()
+
+    def toggle_travel(self) -> None:
+        self.show_travel.setChecked(not self.show_travel.isChecked())
 
     def _travel_toggled(self, on: bool) -> None:
         if self._travel_item is not None:

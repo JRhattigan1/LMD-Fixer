@@ -295,6 +295,17 @@ class BedMapView(QGraphicsView):
         if not rect.isEmpty():
             self.fitInView(rect.adjusted(-6, -6, 6, 6), Qt.KeepAspectRatio)
 
+    def apply_motion(self, m) -> None:
+        """Pans (slide) and zooms (push/pull) from a SpaceMouse `Motion`."""
+        self._auto_fit = False
+        h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+        h.setValue(h.value() + int(m.tx * 14))
+        v.setValue(v.value() + int(m.ty * 14))
+        factor = 1 - m.tz * 0.035
+        zoom = abs(self.transform().m11())
+        if 0.05 < zoom * factor < 200:
+            self.scale(factor, factor)
+
     def wheelEvent(self, event) -> None:
         factor = 1.15 ** (event.angleDelta().y() / 120)
         zoom = abs(self.transform().m11())

@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_theme(app)
     window = MainWindow()
     window.show()
+    window.start_spacemouse()
     files = [a for a in argv[1:] if not a.startswith("-")]
     if files:
         window.open_file(files[0])
