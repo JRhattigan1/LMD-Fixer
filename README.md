@@ -62,6 +62,16 @@ pip install -r requirements.txt
 streamlit run lmd_fixer/app.py
 ```
 
+Tests:
+
+```
+pip install -e .[dev]
+python -m pytest
+```
+
+The tests in `tests/` run anywhere. The ones that use the example `.ptp`
+files are skipped on machines that don't have them.
+
 ## How it works
 
 1. Upload a `.ptp`/`.nc`/`.gcode`/`.txt` file.
@@ -187,6 +197,8 @@ lmd_fixer/
   cli.py                        `lmd-fixer` command and Windows app launcher
   gcode.py                      GCodeProgram: load/save, line-based model
   pipeline.py                   FIX_ORDER, run_fix / apply_accepted_changes
+  review.py                     ReviewSession: the step-by-step review, UI-free
+  export.py                     output name, O-number sync, CRLF save, diff rows
   settings.py                   reads fix_settings.toml
   recipes.py                    material/recipe database (recipes.csv)
   fix_settings.toml             which fixes the app offers
@@ -209,6 +221,7 @@ lmd_fixer/
                                 "O1162-AsPosted.ptp" / "O1162-Edited.ptp"
                                 (2-layer run of the same sweep, unedited and
                                 manually fixed)
+tests/                          pytest suite (python -m pytest)
 docs/
   feed-adjustment-design.md     why the feed step and the maps work as they do
   height-feedback-brief.md      brief for a separate, not-yet-started project
@@ -226,7 +239,8 @@ packaging/
 2. Subclass `Fix`, set `id`, `label`, `description`, and implement `apply()`
    returning a `FixResult` with a list of `LineChange` entries (one per
    proposed change — a single line, or a range via `end_index` for
-   multi-line changes like whole sections).
+   multi-line changes like whole sections). Set `default_accept = False` if
+   its changes should start unticked.
 3. Decorate the class with `@register`.
 4. Import the module in `lmd_fixer/fixes/__init__.py`.
 5. If it needs a specific position in the pipeline, add its id to
@@ -236,5 +250,6 @@ It will then appear automatically as a toggle in the sidebar (unless
 `fix_settings.toml` switches it off) and go through the same per-change
 review UI as the existing fixes, with every change accepted by default.
 A fix that removes large chunks, or whose changes are genuinely uncertain,
-should default to keeping instead and get its own rendering branch in
-`app.py`, as `remove_named_sections` does.
+should default to keeping instead and get its own review UI, as
+`remove_named_sections` does. Add a test in `tests/` against the synthetic
+program in `tests/conftest.py`.

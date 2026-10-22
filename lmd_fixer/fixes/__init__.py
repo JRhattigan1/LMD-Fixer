@@ -73,12 +73,24 @@ class FixResult:
     changes: list[LineChange] = field(default_factory=list)
 
 
+ReviewMode = Literal["checklist", "sections", "recipes", "feeds"]
+
+
 class Fix(ABC):
     """Base class for a single G-code fix/transformation."""
 
     id: str = ""
     label: str = ""
     description: str = ""
+    # How the fix is reviewed. "checklist" is the generic accept/reject list
+    # of its proposed changes; the others are fixes with their own review UI.
+    # "recipes" and "feeds" propose nothing until given options, and their
+    # changes are applied together rather than picked one by one.
+    review_mode: ReviewMode = "checklist"
+    # Whether each proposed change starts accepted. Most fixes propose a
+    # specific, usually-safe cleanup; one that removes large chunks or whose
+    # correctness is genuinely uncertain should start on the safe (keep) side.
+    default_accept: bool = True
 
     @abstractmethod
     def apply(self, program: GCodeProgram, **options) -> FixResult:
@@ -113,6 +125,7 @@ __all__ = [
     "available_fixes",
     "section_names",
     "SECTION_MARKER_RE",
+    "ReviewMode",
 ]
 
 # Import fix modules so their @register decorators run.

@@ -48,6 +48,18 @@ Longer design notes live in `docs/`:
   the changes the user accepted, handling both single lines and ranges), and
   `run_pipeline` (applies every fix unconditionally with no review — kept for
   scripting, not used by the UI).
+- `lmd_fixer/review.py` — `ReviewSession`, the UI-free review state machine:
+  the selected fixes in `FIX_ORDER`, the current step, a history stack for
+  Back, and the reviewer's choices per step (accept/reject overrides of the
+  fix's default, or options for an option-driven fix). Choices survive Back
+  and `restart()`; `set_selection()` starts over and forgets them, and
+  `selection_change_discards_work()` says whether to ask first. The desktop
+  app (in progress) and `--selftest` drive it; the
+  Streamlit app still keeps its own copy of these rules in session state.
+- `lmd_fixer/export.py` — what the machine gets and what changed:
+  `plan_output` (output name, extension checks, O-number sync, with notes to
+  show), `machine_bytes`/`write_program` (always CRLF), `diff_rows` (the
+  side-by-side diff as data, for any UI to draw), `change_context`.
 - `lmd_fixer/recipes.py` — the material/recipe database: one CSV row per
   `M98 Pxxxx` recipe number: the panel settings (laser power, powder flow
   g/min, nozzle gas) plus Material/Notes, which are operator notes
@@ -83,10 +95,13 @@ Longer design notes live in `docs/`:
   fix is proposing a specific, usually-safe cleanup). `remove_named_sections`
   defaults to "keep everything" because ticking a section removes ~200+
   lines at once across ~45 sections — an accidental "accept all" there would
-  silently gut the program. When adding a fix that removes large chunks or
+  silently gut the program. Each fix declares this itself: `default_accept`
+  (False for `remove_named_sections`) and `review_mode` ("checklist" for the
+  generic list; "sections", "recipes" and "feeds" for the fixes with their
+  own review UI, the last two being option-driven and applied all at once).
+  `ReviewSession` reads both. When adding a fix that removes large chunks or
   whose correctness is genuinely uncertain, default to the safe (keep) side
-  and give the UI its own rendering branch in `app.py` rather than reusing
-  the generic accept-by-default checklist.
+  and give it its own review UI rather than the generic checklist.
 - **Changing the fix selection mid-review asks before discarding.** The review
   restarts from the original file whenever the chosen set of fixes changes,
   because the program has already been through the fixes behind the current
@@ -295,16 +310,19 @@ because a build is thousands of files. Things that look removable but aren't:
 
 ## Testing changes
 
-There's no formal test suite yet. When changing or adding a fix, verify by
-running it against `lmd_fixer/tests/O1140 - Original.ptp` via a quick Python
-snippet (see recent commits for the pattern: `run_fix` then
-`apply_accepted_changes` with `{c.original_index for c in result.changes}`
-for full-accept, or a subset to check partial-accept behaves correctly) and
-sanity-check the before/after line counts and a few sample changes.
+Run `python -m pytest` (install with `pip install -e .[dev]`). The suite is in
+`tests/` at the top level; `lmd_fixer/tests/` holds only the example `.ptp`
+files. Most tests use `sample_program` from `tests/conftest.py`, a small
+synthetic program shaped like the real files (three toolpaths, recipe calls,
+rotary commands, footer), so they run on a fresh clone. Tests on the real
+files use the `real_file` fixture, which skips when a file isn't present.
+When changing or adding a fix, add a test against the synthetic program, and
+check the real files too.
 
-Full-pipeline check against the references: run `FIX_ORDER` accepting every
-change **except** in `remove_named_sections`, where accepting everything
-removes all 45 sections and leaves 21 lines. Done that way the result differs
+Full-pipeline check against the references (`tests/test_reference_files.py`):
+a `ReviewSession` over `FIX_ORDER`, applying every step with its defaults,
+which accepts every change except in `remove_named_sections` (accepting
+everything there removes all 45 sections and leaves 21 lines). Done that way the result differs
 from `O1140.ptp` by exactly the documented deltas — 45 `G90 G0 A0.0`, 3
 dwells, 6 `M325`, plus blank lines — and from `O1162-Edited.ptp` by only the
 3 genuine-P-change dwells that reference keeps (it removes every

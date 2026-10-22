@@ -71,6 +71,7 @@ def set_p_value(line: str, p_value: int, width: int) -> str:
 @register
 class ChangeRecipes(Fix):
     id = "change_recipes"
+    review_mode = "recipes"
     label = "Change P recipe numbers"
     description = (
         "Changes the recipe number — the P of each toolpath's M98 Pxxxx call, which selects laser power, "

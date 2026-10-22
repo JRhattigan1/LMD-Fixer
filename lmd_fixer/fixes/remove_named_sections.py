@@ -58,6 +58,10 @@ def _footer_start(lines: list[str]) -> int:
 @register
 class RemoveNamedSections(Fix):
     id = "remove_named_sections"
+    review_mode = "sections"
+    # Ticking a section removes ~200+ lines at once, so nothing starts ticked:
+    # an accidental "accept all" would silently gut the program.
+    default_accept = False
     label = "Remove named program sections"
     description = "Lists each named (SECTION_NAME) block in the program so you can choose which ones to remove entirely."
 

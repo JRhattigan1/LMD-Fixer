@@ -12,6 +12,9 @@ dependencies = [
     "streamlit>=1.36",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.scripts]
 lmd-fixer = "lmd_fixer.cli:main"
 
@@ -24,3 +27,7 @@ exclude = ["lmd_fixer.tests*"]
 
 [tool.setuptools.package-data]
 lmd_fixer = ["fix_settings.toml"]
+
+[tool.pytest.ini_options]
+# lmd_fixer/tests/ holds the example .ptp files, not test code.
+testpaths = ["tests"]

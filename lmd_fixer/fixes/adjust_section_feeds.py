@@ -718,6 +718,66 @@ def path_points(program: GCodeProgram, toolpaths: list[Toolpath]) -> list[dict]:
     return rows
 
 
+def parse_split_distances(text: str) -> tuple[list[float], bool]:
+    """'20, 100.5' -> ([20.0, 100.5], True). Blank -> ([], True); anything
+    unparseable -> ([], False)."""
+    if not text or not text.strip():
+        return [], True
+    try:
+        return [float(t) for t in re.split(r"[,\s;]+", text.strip()) if t], True
+    except ValueError:
+        return [], False
+
+
+def densify_ramped_path(points: list[dict], ramp_for_section: dict) -> list[dict]:
+    """Adds plotting vertices inside ramped sections so the feed gradient is
+    actually visible. Display-only: `path_points` stays true to the geometry.
+
+    A line is drawn one flat colour per segment, so a section is only drawn as
+    a gradient if it has vertices to break it up. Curves arrive as ~0.5 mm
+    chords and have plenty, but the CAM writes a straight as one or two very
+    long moves — 7 of the 16 straights in a test toolpath come through as a
+    single segment, which can only ever be one colour. The G-code is right in
+    those sections; the preview just had nowhere to show it.
+
+    Each segment of a ramped section is split into as many pieces as the feed
+    has `RAMP_FEED_STEP` steps across it, which is exactly the number of
+    distinct colours it can show — no more, so the added points stay cheap.
+    Untouched sections are passed through as they are. `ramp_for_section`
+    maps `(toolpath, section)` to `(start_feed, end_feed)`.
+    """
+    if not ramp_for_section:
+        return points
+
+    out: list[dict] = []
+    previous: dict | None = None
+    for row in points:
+        key = (row["toolpath"], row["section"])
+        pair = ramp_for_section.get(key)
+        same_run = (
+            previous is not None
+            and previous["run"] == row["run"]
+            and (previous["toolpath"], previous["section"]) == key
+        )
+        if pair and same_run:
+            start_feed, end_feed = pair
+            span = end_feed - start_feed
+            feed_from = round_to_step(start_feed + span * previous["t"])
+            feed_to = round_to_step(start_feed + span * row["t"])
+            steps = int(abs(feed_to - feed_from) / RAMP_FEED_STEP)
+            for k in range(1, steps):
+                f = k / steps
+                out.append({
+                    **row,
+                    "x": previous["x"] + (row["x"] - previous["x"]) * f,
+                    "y": previous["y"] + (row["y"] - previous["y"]) * f,
+                    "t": previous["t"] + (row["t"] - previous["t"]) * f,
+                })
+        out.append(row)
+        previous = row
+    return out
+
+
 def _set_feed_word(line: str, value: float) -> str:
     """Replaces the line's F word (outside comments), or appends one before
     any trailing comment."""
@@ -840,6 +900,7 @@ def _ramp_move_lines(
 @register
 class AdjustSectionFeeds(Fix):
     id = "adjust_section_feeds"
+    review_mode = "feeds"
     label = "Adjust feed rate per toolpath section"
     description = (
         "Divides each named toolpath into sections (equal deposition length, at set distances, or "

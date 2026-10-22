@@ -151,8 +151,10 @@ def _selftest(args: list[str]) -> int:
     config.set_option("global.developmentMode", False)
     logger.set_log_level("error")
 
+    from lmd_fixer.export import write_program
     from lmd_fixer.gcode import GCodeProgram
-    from lmd_fixer.pipeline import FIX_ORDER, apply_accepted_changes, run_fix
+    from lmd_fixer.pipeline import FIX_ORDER
+    from lmd_fixer.review import ReviewSession
 
     print(f"LMD Fixer v{__version__} self-test")
     at = AppTest.from_file(str(APP_PATH), default_timeout=120).run()
@@ -170,14 +172,18 @@ def _selftest(args: list[str]) -> int:
     source, dest = args
     program = GCodeProgram.from_file(source)
     print(f"ok   read {source}: {len(program.lines):,} lines")
-    for fix_id in FIX_ORDER:
-        # Accepting every proposed section removal would delete every section.
-        if fix_id == "remove_named_sections":
-            continue
-        result = run_fix(program, fix_id).result
-        program = apply_accepted_changes(program, result, {c.original_index for c in result.changes})
-        print(f"ok   {fix_id}: {len(result.changes)} change(s)")
-    Path(dest).write_bytes(program.to_text("\r\n").encode("utf-8"))
+    # Through the same state machine the UI drives, applying each step with
+    # its fix's defaults: every change accepted, except section removal
+    # (which defaults to keeping everything — accepting every section would
+    # delete them all) and the option-driven fixes, which propose nothing.
+    session = ReviewSession(program, FIX_ORDER)
+    while not session.finished:
+        fix_id = session.fix_id
+        n_changes = len(session.proposal().changes)
+        session.apply()
+        print(f"ok   {fix_id}: {n_changes} change(s)")
+    program = session.result()
+    write_program(program, dest)
     print(f"ok   wrote {dest}: {len(program.lines):,} lines")
     return 0
 

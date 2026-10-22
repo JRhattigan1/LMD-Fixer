@@ -128,6 +128,8 @@ def validate_recipes(df: pd.DataFrame) -> list[str]:
     if dupes:
         errors.append("Each P number can appear only once: " + ", ".join(format_p(p) for p in dupes) + " repeated.")
     for col in NUMERIC_COLUMNS:
+        if col not in df.columns:
+            continue
         values = df[col]
         bad = values.notna() & pd.to_numeric(values, errors="coerce").isna()
         for row in bad[bad].index:

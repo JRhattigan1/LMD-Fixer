@@ -6,7 +6,6 @@ Run with `lmd-fixer` (installed entry point) or
 
 from __future__ import annotations
 
-import difflib
 import html
 import re
 import sys
@@ -29,11 +28,14 @@ from lmd_fixer.fixes.adjust_section_feeds import (
     DEFAULT_CHORD_MM,
     RAMP_FEED_STEP,
     analyse_toolpaths,
+    densify_ramped_path,
     format_feed,
     group_into_parts,
+    parse_split_distances,
     path_points,
     round_to_step,
 )
+from lmd_fixer.export import change_context, default_output_name, diff_rows, plan_output
 from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.pipeline import FIX_ORDER, apply_accepted_changes, run_fix
 from lmd_fixer.settings import settings_path
@@ -41,33 +43,6 @@ from lmd_fixer.settings import settings_path
 # Only render per-change context previews when the list is small enough for
 # them to be useful rather than overwhelming (and cheap enough to render).
 MAX_CHANGES_WITH_CONTEXT = 40
-
-# Standalone program-number header line, e.g. `O1140` (optionally `/`-blocked
-# like other lines). The machine expects this to match the program's filename.
-O_NUMBER_LINE_RE = re.compile(r"^(/?\s*O)(\d+)\s*$")
-O_NUMBER_IN_NAME_RE = re.compile(r"O(\d+)", re.IGNORECASE)
-
-
-def sync_o_number(program: GCodeProgram, output_name: str) -> tuple[GCodeProgram, str | None, str | None]:
-    """Rewrites the program's `Oxxxx` header line to match the O-number found
-    in `output_name`, if both are present. Returns (possibly new program,
-    old number, new number); numbers are None where there's nothing to sync
-    (no O-number line, or no O#### in the chosen filename)."""
-    name_match = O_NUMBER_IN_NAME_RE.search(output_name)
-    if not name_match:
-        return program, None, None
-    new_number = name_match.group(1)
-    for i, line in enumerate(program.lines):
-        line_match = O_NUMBER_LINE_RE.match(line.strip())
-        if line_match:
-            old_number = line_match.group(2)
-            if old_number == new_number:
-                return program, old_number, new_number
-            out = program.copy()
-            out.lines[i] = f"{line_match.group(1)}{new_number}"
-            return out, old_number, new_number
-    return program, None, None
-
 
 ACCENT = "#2dd4bf"
 DIM = "#8b93a3"
@@ -243,33 +218,7 @@ def render_side_by_side_diff(
     to `n_context` lines either side of each change, with a marker row showing
     how many lines were hidden.
     """
-    matcher = difflib.SequenceMatcher(a=original_lines, b=final_lines, autojunk=False)
-    rows = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            n = i2 - i1
-            if n > 2 * n_context + 1:
-                for k in range(n_context):
-                    rows.append((original_lines[i1 + k], final_lines[j1 + k], "equal"))
-                rows.append((f"{n - 2 * n_context} unchanged lines hidden", "", "gap"))
-                for k in range(n - n_context, n):
-                    rows.append((original_lines[i1 + k], final_lines[j1 + k], "equal"))
-            else:
-                for oi, fi in zip(range(i1, i2), range(j1, j2)):
-                    rows.append((original_lines[oi], final_lines[fi], "equal"))
-        elif tag == "delete":
-            for oi in range(i1, i2):
-                rows.append((original_lines[oi], "", "delete"))
-        elif tag == "insert":
-            for fi in range(j1, j2):
-                rows.append(("", final_lines[fi], "insert"))
-        elif tag == "replace":
-            left = list(range(i1, i2))
-            right = list(range(j1, j2))
-            for k in range(max(len(left), len(right))):
-                otext = original_lines[left[k]] if k < len(left) else ""
-                ftext = final_lines[right[k]] if k < len(right) else ""
-                rows.append((otext, ftext, "replace"))
+    rows = [(r.left, r.right, r.tag) for r in diff_rows(original_lines, final_lines, n_context)]
 
     row_colors = {
         "equal": ("transparent", "transparent"),
@@ -304,18 +253,6 @@ def render_side_by_side_diff(
         '<th style="text-align:left; padding:6px 8px;">Final</th></tr>'
         "</thead><tbody>" + "".join(html_rows) + "</tbody></table></div>"
     )
-
-
-def render_change_context(lines: list[str], start: int, end: int, n_context: int = 3) -> str:
-    """Plain-text excerpt around a change: line numbers, with the changed
-    lines marked by a leading arrow."""
-    lo = max(0, start - n_context)
-    hi = min(len(lines) - 1, end + n_context)
-    out = []
-    for i in range(lo, hi + 1):
-        marker = "->" if start <= i <= end else "  "
-        out.append(f"{marker} {i + 1:>6}  {lines[i]}")
-    return "\n".join(out)
 
 
 def _sync_children_to_master(master_key: str, child_keys: list[str]) -> None:
@@ -364,17 +301,6 @@ def _go_back() -> None:
     st.session_state["applied_summaries"].pop()
     st.session_state["fix_index"] -= 1
     st.rerun()
-
-
-def _parse_split_distances(text: str) -> tuple[list[float], bool]:
-    """'20, 100.5' -> ([20.0, 100.5], True). Blank -> ([], True); anything
-    unparseable -> ([], False)."""
-    if not text or not text.strip():
-        return [], True
-    try:
-        return [float(t) for t in re.split(r"[,\s;]+", text.strip()) if t], True
-    except ValueError:
-        return [], False
 
 
 # Feed ramps, low feed -> high feed. Every one is trimmed so both ends clear
@@ -497,54 +423,6 @@ def _selected_section_keys(chart_state) -> list[str]:
     """`"<toolpath key>|<section number>"` for each section picked by clicking the
     path itself on the map."""
     return _selected_keys(chart_state, MAP_SECTION_SELECTION, "pkey")
-
-
-def densify_ramped_path(points: list[dict], ramp_for_section: dict) -> list[dict]:
-    """Adds plotting vertices inside ramped sections so the feed gradient is
-    actually visible.
-
-    A line mark is one flat colour per segment, so a section is only drawn as
-    a gradient if it has vertices to break it up. Curves arrive as ~0.5 mm
-    chords and have plenty, but the CAM writes a straight as one or two very
-    long moves — 7 of the 16 straights in a test toolpath come through as a
-    single segment, which can only ever be one colour. The G-code is right in
-    those sections; the preview just had nowhere to show it.
-
-    Each segment of a ramped section is split into as many pieces as the feed
-    has `RAMP_FEED_STEP` steps across it, which is exactly the number of
-    distinct colours it can show — no more, so the added points stay cheap.
-    Untouched sections are passed through as they are.
-    """
-    if not ramp_for_section:
-        return points
-
-    out: list[dict] = []
-    previous: dict | None = None
-    for row in points:
-        key = (row["toolpath"], row["section"])
-        pair = ramp_for_section.get(key)
-        same_run = (
-            previous is not None
-            and previous["run"] == row["run"]
-            and (previous["toolpath"], previous["section"]) == key
-        )
-        if pair and same_run:
-            start_feed, end_feed = pair
-            span = end_feed - start_feed
-            feed_from = round_to_step(start_feed + span * previous["t"])
-            feed_to = round_to_step(start_feed + span * row["t"])
-            steps = int(abs(feed_to - feed_from) / RAMP_FEED_STEP)
-            for k in range(1, steps):
-                f = k / steps
-                out.append({
-                    **row,
-                    "x": previous["x"] + (row["x"] - previous["x"]) * f,
-                    "y": previous["y"] + (row["y"] - previous["y"]) * f,
-                    "t": previous["t"] + (row["t"] - previous["t"]) * f,
-                })
-        out.append(row)
-        previous = row
-    return out
 
 
 def _plan_view(boxes: pd.DataFrame, size: int) -> tuple[alt.Scale, alt.Scale, float, float]:
@@ -1119,7 +997,7 @@ def render_feed_sections_step(program: GCodeProgram, fix_id: str, fix_index: int
         # since it renumbers every section in the toolpath.
         base = "geo" if geo_state.get(key) else None
         if base is None:
-            distances, ok = _parse_split_distances(splits_state.get(key, ""))
+            distances, ok = parse_split_distances(splits_state.get(key, ""))
             base = (
                 "at " + ",".join(f"{d:g}" for d in sorted(set(distances)))
                 if ok and distances
@@ -1133,7 +1011,7 @@ def render_feed_sections_step(program: GCodeProgram, fix_id: str, fix_index: int
         """The current division state as `analyse_toolpaths` arguments."""
         return (
             {start_by_key[k]: n for k, n in sections_state.items() if k in start_by_key},
-            {start_by_key[k]: _parse_split_distances(t)[0] for k, t in splits_state.items() if k in start_by_key},
+            {start_by_key[k]: parse_split_distances(t)[0] for k, t in splits_state.items() if k in start_by_key},
             {start_by_key[k] for k, on in geo_state.items() if on and k in start_by_key},
             {start_by_key[k] for k, on in layer_state.items() if on and k in start_by_key},
         )
@@ -1327,7 +1205,7 @@ def render_feed_sections_step(program: GCodeProgram, fix_id: str, fix_index: int
         sections_state[key] = 1 if pd.isna(row["Sections"]) else max(1, int(row["Sections"]))
         text = row["Split at (mm)"] if isinstance(row["Split at (mm)"], str) else ""
         splits_state[key] = text
-        if not _parse_split_distances(text)[1]:
+        if not parse_split_distances(text)[1]:
             bad_splits.append(row["Toolpath"])
     if bad_splits:
         step1.warning(f"Couldn't read split distances for: {', '.join(bad_splits)} — using Sections instead.")
@@ -2556,7 +2434,7 @@ if fix_index < len(selected_ids):
                 if show_context:
                     with st.expander("Show surrounding lines", expanded=False):
                         st.code(
-                            render_change_context(current_program.lines, change.original_index, end),
+                            change_context(current_program.lines, change.original_index, end),
                             language=None,
                         )
 
@@ -2582,48 +2460,21 @@ else:
 
     default_name = st.session_state.get("output_name_default")
     if default_name != uploaded.name or "output_name" not in st.session_state:
-        st.session_state["output_name"] = f"fixed_{uploaded.name}"
+        st.session_state["output_name"] = default_output_name(uploaded.name)
         st.session_state["output_name_default"] = uploaded.name
     with st.form("output_name_form", border=False):
         st.text_input("Output file name", key="output_name")
         st.form_submit_button("Update file name")
-    output_name = st.session_state["output_name"]
-    fallback_name = f"fixed_{uploaded.name}"
-    if not output_name.strip():
-        st.warning(f"Output file name is empty — falling back to '{fallback_name}'.")
-    final_name = output_name.strip() or fallback_name
-
-    upload_suffix = Path(uploaded.name).suffix.lower()
-    final_suffix = Path(final_name).suffix.lower()
-    if upload_suffix and not final_suffix:
-        final_name += upload_suffix
-        st.caption(f"No file extension given — appended '{upload_suffix}' to match the uploaded file.")
-    elif upload_suffix and final_suffix != upload_suffix:
-        st.warning(
-            f"File extension changed from '{upload_suffix}' to '{final_suffix}' — "
-            "the machine controller may expect the original extension."
-        )
-
-    name_matches = O_NUMBER_IN_NAME_RE.findall(final_name)
-    if len(name_matches) > 1:
-        st.warning(
-            f"Multiple O-numbers found in the file name ({', '.join('O' + n for n in name_matches)}) — "
-            f"using the first one, O{name_matches[0]}."
-        )
-    download_program, old_o_number, new_o_number = sync_o_number(current_program, final_name)
-    if old_o_number and new_o_number and old_o_number != new_o_number:
-        st.caption(f"Program number: O{old_o_number} → **O{new_o_number}** (to match the file name).")
-    elif old_o_number and new_o_number:
-        st.caption(f"Program number already matches the file name (O{new_o_number}).")
-    elif name_matches:
-        st.caption("No O-number header line found in this program — file name left as the only reference.")
+    output = plan_output(current_program, uploaded.name, st.session_state["output_name"])
+    for level, note in output.notes:
+        (st.warning if level == "warning" else st.caption)(note)
 
     col_dl, col_back, col_restart, _ = st.columns([2, 1, 1, 1])
     with col_dl:
         st.download_button(
             "⬇ Download fixed file",
-            data=download_program.to_text("\r\n"),
-            file_name=final_name,
+            data=output.to_bytes(),
+            file_name=output.name,
             mime="text/plain",
             type="primary",
             use_container_width=True,
