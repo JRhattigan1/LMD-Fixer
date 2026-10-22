@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QAction, QKeySequence, QUndoStack
+from PySide6.QtGui import QAction, QColor, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
@@ -23,21 +23,25 @@ from PySide6.QtWidgets import (
 
 from lmd_fixer import __version__
 from lmd_fixer.desktop import theme
+from lmd_fixer.desktop.bed_map import BedMapView, ToolpathStyle
 from lmd_fixer.desktop.final_view import DiffView, FinalPanel
+from lmd_fixer.desktop.recipe_dialog import RecipeDialog
 from lmd_fixer.desktop.gcode_view import GCodeView
 from lmd_fixer.desktop.steps.checklist import ChecklistPanel
 from lmd_fixer.desktop.steps.pending import PendingPanel
+from lmd_fixer.desktop.steps.recipes import RecipesPanel
 from lmd_fixer.desktop.steps_panel import StepsPanel
 from lmd_fixer.export import default_output_name, diff_rows
 from lmd_fixer.fixes import available_fixes
+from lmd_fixer.fixes.change_recipes import toolpath_recipe_calls
 from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.review import ReviewSession, ordered_fix_ids
 from lmd_fixer.settings import settings_path
 
 FILE_FILTER = "G-code programs (*.ptp *.nc *.gcode *.txt);;All files (*)"
 MAX_RECENT = 8
-# Review modes the checklist panel handles. "sections" uses it until the
-# section-removal step gets its map.
+# Review modes the checklist panel handles; "sections" rows are whole
+# toolpath blocks, so the map can tick them too.
 CHECKLIST_MODES = {"checklist", "sections"}
 
 
@@ -102,17 +106,26 @@ class MainWindow(QMainWindow):
         # Central area: welcome page, or the workspace once a file is open.
         self.central = QStackedWidget()
         self.welcome = Welcome(self)
+        self.map = BedMapView()
         self.code = GCodeView()
         self.diff = DiffView()
+        self.map_and_code = QSplitter(Qt.Horizontal)
+        self.map_and_code.setObjectName("map_and_code")
+        self.map_and_code.addWidget(self.map)
+        self.map_and_code.addWidget(self.code)
+        self.map_and_code.setStretchFactor(0, 1)
+        self.map_and_code.setStretchFactor(1, 1)
+        self.map_and_code.setSizes([600, 600])  # until the saved layout says otherwise
         self.top = QStackedWidget()
-        self.top.addWidget(self.code)
+        self.top.addWidget(self.map_and_code)
         self.top.addWidget(self.diff)
 
         self.checklist = ChecklistPanel(self.undo)
+        self.recipes = RecipesPanel(self.undo)
         self.pending = PendingPanel()
         self.final = FinalPanel()
         self.panels = QStackedWidget()
-        for panel in (self.checklist, self.pending, self.final):
+        for panel in (self.checklist, self.recipes, self.pending, self.final):
             self.panels.addWidget(panel)
 
         nav = QHBoxLayout()
@@ -177,6 +190,8 @@ class MainWindow(QMainWindow):
         self.act_skip = action("Skip step", None, self.skip_step)
         self.act_back = action("Back", "Alt+Left", self.back_step)
         self.act_restart = action("Start over", None, self.restart)
+        self.act_database = action("Material database…", "Ctrl+M", self.open_material_database)
+        self.act_fit = action("Fit bed map", None, lambda: self.map.fit())
         self.act_undo = self.undo.createUndoAction(self, "Undo")
         self.act_undo.setShortcut(QKeySequence.Undo)
         self.act_redo = self.undo.createRedoAction(self, "Redo")
@@ -187,7 +202,7 @@ class MainWindow(QMainWindow):
         self.review_actions = [
             action("Next change", "J", lambda: self.checklist.move(1)),
             action("Previous change", "K", lambda: self.checklist.move(-1)),
-            action("Toggle change", "Space", self.checklist.toggle_current),
+            action("Toggle change", "Space", self.checklist.toggle_selected),
             action("Accept all", "A", lambda: self.checklist.set_all(True)),
             action("Reject all", "R", lambda: self.checklist.set_all(False)),
         ]
@@ -207,13 +222,17 @@ class MainWindow(QMainWindow):
         review_menu.addSeparator()
         for a in self.review_actions:
             review_menu.addAction(a)
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(self.act_fit)
+        tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.addAction(self.act_database)
         self._fill_recent_menu()
 
         toolbar = self.addToolBar("Main")
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
         for a in (self.act_open, self.act_save, None, self.act_undo, self.act_redo, None,
-                  self.act_back, self.act_skip, self.act_apply):
+                  self.act_back, self.act_skip, self.act_apply, None, self.act_database):
             if a is None:
                 toolbar.addSeparator()
             else:
@@ -225,8 +244,12 @@ class MainWindow(QMainWindow):
         self.back_button.clicked.connect(self.back_step)
         self.steps.selectionEdited.connect(self.selection_edited)
         self.steps.stepRequested.connect(self.go_to_step)
-        self.checklist.changeSelected.connect(lambda pos: self.code.set_current_change(pos))
-        self.checklist.choicesChanged.connect(self._mark_code)
+        self.checklist.selectionMoved.connect(self._list_selection_moved)
+        self.checklist.choicesChanged.connect(self._choices_changed)
+        self.recipes.selectionMoved.connect(self._list_selection_moved)
+        self.recipes.choicesChanged.connect(self._choices_changed)
+        self.map.selectionEdited.connect(self._map_selection_edited)
+        self.map.toolpathActivated.connect(self._map_activated)
         self.code.lineActivated.connect(self._code_line_activated)
         self.final.nameEdited.connect(self._name_edited)
         self.final.saveRequested.connect(self.save_dialog)
@@ -245,10 +268,16 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geometry)
         if state is not None:
             self.restoreState(state)
+        for key, splitter in (("window/split_rows", self.splitter), ("window/split_top", self.map_and_code)):
+            saved = self.settings.value(key)
+            if saved is not None:
+                splitter.restoreState(saved)
 
     def closeEvent(self, event) -> None:
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/state", self.saveState())
+        self.settings.setValue("window/split_rows", self.splitter.saveState())
+        self.settings.setValue("window/split_top", self.map_and_code.saveState())
         super().closeEvent(event)
 
     # -- files -----------------------------------------------------------------
@@ -395,15 +424,20 @@ class MainWindow(QMainWindow):
                                    session.summaries, self.output_name)
             self._name_edited(self.output_name)
         else:
-            self.top.setCurrentWidget(self.code)
+            self.top.setCurrentWidget(self.map_and_code)
             self.code.set_lines(session.current.lines)
-            if session.fix.review_mode in CHECKLIST_MODES:
+            self.map.load(session.current)
+            mode = session.fix.review_mode
+            if mode in CHECKLIST_MODES:
                 self.panels.setCurrentWidget(self.checklist)
-                self.checklist.load(session)
+                self.checklist.load(session, self._part_of_changes(session))
+            elif mode == "recipes":
+                self.panels.setCurrentWidget(self.recipes)
+                self.recipes.load(session, self._part_of_toolpaths())
             else:
                 self.panels.setCurrentWidget(self.pending)
                 self.pending.load(session)
-                self.code.show_changes([], lambda i: True)
+                self._choices_changed()
         self._enable(has_file=True)
 
     def _enable(self, has_file: bool) -> None:
@@ -424,15 +458,139 @@ class MainWindow(QMainWindow):
         for widget in (self.apply_button, self.skip_button, self.back_button):
             widget.setVisible(has_file)
 
-    def _mark_code(self) -> None:
-        if self.session and not self.session.finished:
-            self.code.show_changes(self.checklist.changes, self.session.is_accepted,
-                                   self.checklist.current_position())
+    # -- linking the map, the code and the step list -------------------------------
+
+    def _part_of_toolpaths(self) -> dict[int, str]:
+        return {s: f"{i.part} ({i.where})" if i.where else i.part for s, i in self.map.info.items()}
+
+    def _part_of_changes(self, session: ReviewSession) -> dict[int, str]:
+        parts = self._part_of_toolpaths()
+        out = {}
+        for change in session.proposal().changes:
+            start = self.map.toolpath_at_line(change.original_index)
+            if start is not None:
+                out[change.original_index] = parts[start]
+        return out
+
+    def _mode(self) -> str | None:
+        if self.session is None or self.session.finished:
+            return None
+        return self.session.fix.review_mode
+
+    def _choices_changed(self) -> None:
+        """Re-marks the code and restyles the map after any choice edit."""
+        session = self.session
+        if session is None or session.finished:
+            return
+        mode = session.fix.review_mode
+        changes = session.proposal().changes
+        current = self.checklist.current_position() if mode in CHECKLIST_MODES else None
+        self.code.show_changes(changes, session.is_accepted, current)
+        styles, tips = {}, {}
+        if mode == "sections":
+            for change in changes:
+                gone = session.is_accepted(change.original_index)
+                styles[change.original_index] = ToolpathStyle(
+                    colour=theme.REMOVAL_GONE if gone else theme.REMOVAL_KEPT,
+                    width=2.0, dashed=gone, label="✕" if gone else "", label_bold=gone,
+                    tint=QColor(208, 59, 59, 40) if gone else None,
+                )
+                tips[change.original_index] = "Will be removed" if gone else "Kept"
+        elif mode == "recipes":
+            chosen = self.recipes.chosen()
+            for call in self.recipes.calls:
+                new = chosen.get(call.start_index)
+                p = new if new is not None else call.p_value
+                if p is None:
+                    continue
+                styles[call.start_index] = ToolpathStyle(
+                    colour=theme.RECIPE_CHANGED if new is not None else theme.RECIPE_UNCHANGED,
+                    width=3.0 if new is not None else 1.5,
+                    label=f"P{p}", label_bold=new is not None,
+                )
+                was = f"P{call.p_value:0{call.p_width}d} → " if new is not None else ""
+                tips[call.start_index] = f"{was}P{p:0{call.p_width}d} · {self.recipes.recorded_as(p)}"
+        elif mode == "checklist":
+            # How many ticked changes each toolpath holds, as a label rather
+            # than a colour, so no unvalidated colour pair is introduced.
+            ticked: dict[int, int] = {}
+            for c in changes:
+                start = self.map.toolpath_at_line(c.original_index)
+                if start is not None and session.is_accepted(c.original_index):
+                    ticked[start] = ticked.get(start, 0) + 1
+            for start, n in ticked.items():
+                styles[start] = ToolpathStyle(label=f"{n} ✓")
+                tips[start] = f"{n} ticked change(s) in this toolpath"
+        self.map.set_styles(styles, tips)
+
+    def _starts_for_positions(self, positions) -> list[int]:
+        changes = self.checklist.changes
+        starts = {self.map.toolpath_at_line(changes[p].original_index) for p in positions}
+        return sorted(starts - {None})
+
+    def _list_selection_moved(self, selection: list) -> None:
+        """The step list's selection moved: follow it on the map and in the code."""
+        mode = self._mode()
+        if mode in CHECKLIST_MODES:
+            self.map.set_selected(self._starts_for_positions(selection))
+            if selection:
+                self.code.set_current_change(selection[0])
+        elif mode == "recipes":
+            self.map.set_selected(selection)
+            if selection:
+                self.code.go_to_line(selection[0])
+
+    def _map_selection_edited(self, starts: list) -> None:
+        """Toolpaths picked on the map: select their rows and show the first."""
+        mode = self._mode()
+        if mode in CHECKLIST_MODES:
+            wanted = set(starts)
+            positions = [p for p, c in enumerate(self.checklist.changes)
+                         if self.map.toolpath_at_line(c.original_index) in wanted]
+            self.checklist.select_positions(positions)
+            if positions:
+                self.code.set_current_change(positions[0])
+        elif mode == "recipes":
+            self.recipes.select_starts(starts)
+            if starts:
+                self.code.go_to_line(starts[0])
+
+    def _map_activated(self, start: int) -> None:
+        """Double-click on the map: toggle that toolpath's changes."""
+        mode = self._mode()
+        if mode in CHECKLIST_MODES:
+            info = self.map.info[start]
+            indices = [c.original_index for c in self.checklist.changes
+                       if info.start <= c.original_index <= info.end]
+            if indices:
+                self.checklist.set_indices(indices, not self.session.is_accepted(indices[0]))
+        elif mode == "recipes":
+            self.recipes.select_starts([start])
+            self.map.set_selected([start])
+            self.recipes.new_p.setFocus()
+            self.recipes.new_p.selectAll()
 
     def _code_line_activated(self, line: int) -> None:
+        self.map.set_focus(self.map.toolpath_at_line(line))
         pos = self.code.change_at_line(line)
         if pos is not None and self.panels.currentWidget() is self.checklist:
-            self.checklist.select_position(pos)
+            self.checklist.select_positions([pos])
+            self.map.set_selected(self._starts_for_positions([pos]))
+
+    # -- material database -----------------------------------------------------------
+
+    def open_material_database(self) -> None:
+        used = []
+        if self.session is not None:
+            used = [c.p_value for c in toolpath_recipe_calls(self.session.current) if c.p_value is not None]
+        dialog = RecipeDialog(used, self)
+        dialog.saved.connect(self._database_saved)
+        dialog.exec()
+
+    def _database_saved(self) -> None:
+        if self._mode() == "recipes":
+            self.recipes.reload_database()
+            self.recipes.refresh()
 
     # -- saving ------------------------------------------------------------------
 

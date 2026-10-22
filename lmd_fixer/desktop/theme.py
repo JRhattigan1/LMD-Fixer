@@ -23,6 +23,14 @@ REJECTED_BG = QColor(255, 255, 255, 14)
 REMOVE_MARK = QColor("#f85149")
 MODIFY_MARK = QColor("#e3b341")
 
+# Bed map states, each pair validated against SURFACE with the dataviz
+# skill's validate_palette.py. Never the only cue: removal is also dashed,
+# tinted and labelled ✕; a new P is also thicker with a bold label.
+REMOVAL_KEPT = "#1baf7a"
+REMOVAL_GONE = "#d03b3b"  # deutan ΔE 9.9 against KEPT; just under 3:1 on SURFACE
+RECIPE_UNCHANGED = "#3987e5"
+RECIPE_CHANGED = "#d95a1d"  # protan ΔE 27 against UNCHANGED; all checks pass
+
 # Diff view rows.
 DIFF_DELETE_BG = QColor(248, 81, 73, 40)
 DIFF_INSERT_BG = QColor(63, 185, 80, 36)

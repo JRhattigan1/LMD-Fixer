@@ -65,14 +65,30 @@ pip install -e .[desktop]
 python -m lmd_fixer.desktop [FILE]
 ```
 
-It already covers opening files (File menu, drag and drop, recent files),
-the Steps list, the highlighted program with proposed changes marked on
-their lines, the accept/reject review with undo, and the final diff and
-save. Keys: J/K move between changes, Space toggles one, A/R accept or
-reject all, Ctrl+Z/Ctrl+Y undo/redo, Ctrl+Enter applies the step. Still to
-come: the bed maps for section removal and P recipes (section removal uses
-the plain list for now), the P recipe and feed steps, and the material
-database.
+It covers everything except feed adjustment:
+
+- Opening files: the File menu, drag and drop, or recent files.
+- The Steps list.
+- A bed map beside the highlighted program. The map zooms with the wheel,
+  pans with a right- or middle-drag, and F fits it to the bed. Click,
+  Ctrl-click or drag a box to select toolpaths.
+- Proposed changes marked on their lines.
+- The accept/reject review with undo.
+- Section removal and P recipe changes on the map.
+- The material database (Tools → Material database, Ctrl+M).
+- The final diff and save.
+
+Selecting on the map, in the list or in the code selects the same thing
+everywhere. Keys:
+
+- J/K move between changes.
+- Space (or double-clicking a toolpath on the map) flips the selected rows.
+- A/R accept or reject all.
+- Ctrl+Z/Ctrl+Y undo and redo.
+- Ctrl+Enter applies the step.
+
+In the P step, select toolpaths, type the P, and press Enter. Feed
+adjustment is still to come.
 
 ## Running from a checkout (development)
 

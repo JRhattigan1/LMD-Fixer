@@ -1,8 +1,9 @@
 """The generic review: every proposed change listed with a tick box.
 
-Used for every "checklist" fix, and for "sections" until that step gets its
-map. Each change starts ticked or not according to the fix's
-`default_accept`; every toggle goes through the window's undo stack.
+Used for every "checklist" fix and for section removal ("sections"), where
+each row is a whole toolpath block. Each change starts ticked or not
+according to the fix's `default_accept`; every edit goes through the
+window's undo stack. The list's selection is shared with the bed map.
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ from lmd_fixer.desktop.steps.common import SetAcceptedCommand, StepHeader
 from lmd_fixer.fixes import LineChange
 from lmd_fixer.review import ReviewSession
 
-COLUMNS = ["", "Line", "Toolpath", "Change", "Why"]
+COLUMNS = ["", "Line", "Toolpath", "Part", "Change", "Why"]
+CHANGE_COLUMN = 4
 
 
 def describe(change: LineChange) -> tuple[str, str]:
@@ -44,11 +46,14 @@ def describe(change: LineChange) -> tuple[str, str]:
 
 
 class ChecklistPanel(QWidget):
-    """Lists the current step's changes. `changeSelected` fires with the
-    change's position when the selection moves, so the code view can follow;
-    `choicesChanged` after any accept/reject edit."""
+    """Lists the current step's changes.
 
-    changeSelected = Signal(int)
+    `selectionMoved` fires with the selected rows' positions when the user
+    moves the selection (so the code view and map can follow);
+    `choicesChanged` after any accept/reject edit, including undo.
+    """
+
+    selectionMoved = Signal(list)
     choicesChanged = Signal()
 
     def __init__(self, undo: QUndoStack, parent: QWidget | None = None) -> None:
@@ -60,8 +65,8 @@ class ChecklistPanel(QWidget):
 
         self.header = StepHeader()
         self.summary = QLabel()
-        self.accept_all = QPushButton("Accept all")
-        self.reject_all = QPushButton("Reject all")
+        self.accept_all = QPushButton("Tick all")
+        self.reject_all = QPushButton("Untick all")
         self.count = QLabel()
         self.count.setProperty("role", "dim")
         self.accept_all.clicked.connect(lambda: self.set_all(True))
@@ -75,12 +80,13 @@ class ChecklistPanel(QWidget):
         self.tree.setRootIsDecorated(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.header().setSectionResizeMode(CHANGE_COLUMN, QHeaderView.Stretch)
         self.tree.header().setStretchLastSection(False)
         self.tree.setFont(theme.code_font())
         self.tree.itemChanged.connect(self._item_changed)
-        self.tree.currentItemChanged.connect(self._current_changed)
+        self.tree.itemSelectionChanged.connect(self._selection_changed)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.toggle_selected())
 
         bar = QHBoxLayout()
         bar.addWidget(self.accept_all)
@@ -88,9 +94,9 @@ class ChecklistPanel(QWidget):
         bar.addSpacing(12)
         bar.addWidget(self.count)
         bar.addStretch(1)
-        hint = QLabel("J/K move · Space toggles · A/R accept/reject all · Ctrl+Z undo")
-        hint.setProperty("role", "dim")
-        bar.addWidget(hint)
+        self.hint = QLabel()
+        self.hint.setProperty("role", "dim")
+        bar.addWidget(self.hint)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.header)
@@ -100,24 +106,36 @@ class ChecklistPanel(QWidget):
 
     # -- filling -------------------------------------------------------------
 
-    def load(self, session: ReviewSession) -> None:
+    def load(self, session: ReviewSession, part_of_change: dict[int, str] | None = None) -> None:
+        """`part_of_change` maps a change's `original_index` to where on the
+        bed it is; the Part column is hidden without it."""
         self.session = session
         fix = session.fix
         result = session.proposal()
         self.changes = result.changes
         self.header.show_fix(fix.label, fix.description)
         self.summary.setText(result.summary)
+        sections = fix.review_mode == "sections"
+        self.accept_all.setText("Remove all" if sections else "Tick all")
+        self.reject_all.setText("Keep all" if sections else "Untick all")
+        self.hint.setText(
+            ("Ticked = removed. " if sections else "")
+            + "J/K move · Space or double-click toggles the selected · A/R all · Ctrl+Z undo"
+        )
+        parts = part_of_change or {}
         self._filling = True
         self.tree.clear()
         for pos, change in enumerate(self.changes):
             where, what = describe(change)
-            item = QTreeWidgetItem(["", where, change.label or "", what, change.reason or ""])
+            item = QTreeWidgetItem(["", where, change.label or "", parts.get(change.original_index, ""),
+                                    what, change.reason or ""])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setData(0, Qt.UserRole, pos)
             self.tree.addTopLevelItem(item)
         self._filling = False
+        self.tree.setColumnHidden(3, not parts)
         self.refresh()
-        for col in (0, 1, 2, 4):
+        for col in (0, 1, 2, 3, 5):
             self.tree.resizeColumnToContents(col)
         if self.changes:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
@@ -134,7 +152,10 @@ class ChecklistPanel(QWidget):
                 item.setCheckState(0, state)
         self._filling = False
         n = len(self.session.accepted_indices()) if self.changes else 0
-        self.count.setText(f"{n} of {len(self.changes)} selected")
+        removed_lines = sum(c.end_index - c.original_index + 1 for c in self.changes
+                            if self.session.is_accepted(c.original_index))
+        noun = "section(s) to remove" if self.session.fix.review_mode == "sections" else "change(s) ticked"
+        self.count.setText(f"{n} of {len(self.changes)} {noun} · {removed_lines:,} line(s) affected")
         self.choicesChanged.emit()
 
     # -- edits (all undoable) ---------------------------------------------------
@@ -147,20 +168,30 @@ class ChecklistPanel(QWidget):
             return
         change = self.changes[item.data(0, Qt.UserRole)]
         accepted = item.checkState(0) == Qt.Checked
-        self._push({change.original_index: accepted}, f"{'Accept' if accepted else 'Reject'} line {change.original_index + 1}")
+        self._push({change.original_index: accepted}, f"{'Tick' if accepted else 'Untick'} line {change.original_index + 1}")
 
-    def toggle_current(self) -> None:
-        pos = self.current_position()
-        if pos is None:
+    def toggle_selected(self) -> None:
+        """Flips the selected rows: all ticked if the first one isn't, else
+        all unticked."""
+        positions = self.selected_positions() or ([self.current_position()] if self.current_position() is not None else [])
+        if not positions:
             return
-        change = self.changes[pos]
-        accepted = not self.session.is_accepted(change.original_index)
-        self._push({change.original_index: accepted}, f"{'Accept' if accepted else 'Reject'} line {change.original_index + 1}")
+        indices = [self.changes[p].original_index for p in positions]
+        accepted = not self.session.is_accepted(indices[0])
+        what = f"line {indices[0] + 1}" if len(indices) == 1 else f"{len(indices)} changes"
+        self._push({i: accepted for i in indices}, f"{'Tick' if accepted else 'Untick'} {what}")
+
+    def set_indices(self, indices, accepted: bool) -> None:
+        """Ticks or unticks the changes starting at `indices`."""
+        known = {c.original_index for c in self.changes}
+        updates = {i: accepted for i in indices if i in known}
+        if updates:
+            self._push(updates, f"{'Tick' if accepted else 'Untick'} {len(updates)} change(s)")
 
     def set_all(self, accepted: bool) -> None:
         if not self.changes:
             return
-        self._push({c.original_index: accepted for c in self.changes}, "Accept all" if accepted else "Reject all")
+        self._push({c.original_index: accepted for c in self.changes}, "Tick all" if accepted else "Untick all")
 
     # -- selection ---------------------------------------------------------------
 
@@ -168,18 +199,28 @@ class ChecklistPanel(QWidget):
         item = self.tree.currentItem()
         return None if item is None else item.data(0, Qt.UserRole)
 
-    def select_position(self, pos: int) -> None:
-        item = self.tree.topLevelItem(pos)
-        if item is not None and item is not self.tree.currentItem():
-            self.tree.setCurrentItem(item)
+    def selected_positions(self) -> list[int]:
+        return sorted(item.data(0, Qt.UserRole) for item in self.tree.selectedItems())
+
+    def select_positions(self, positions, emit: bool = False) -> None:
+        """Selects rows chosen elsewhere (the map, the code view)."""
+        positions = [p for p in positions if 0 <= p < len(self.changes)]
+        self.tree.blockSignals(not emit)
+        self.tree.clearSelection()
+        for p in positions:
+            self.tree.topLevelItem(p).setSelected(True)
+        if positions:
+            item = self.tree.topLevelItem(positions[0])
+            self.tree.setCurrentItem(item, 0, self.tree.selectionModel().SelectionFlag.NoUpdate)
             self.tree.scrollToItem(item)
+        self.tree.blockSignals(False)
 
     def move(self, step: int) -> None:
+        if not self.changes:
+            return
         pos = self.current_position()
         target = 0 if pos is None else max(0, min(len(self.changes) - 1, pos + step))
-        if self.changes:
-            self.select_position(target)
+        self.tree.setCurrentItem(self.tree.topLevelItem(target))
 
-    def _current_changed(self, current: QTreeWidgetItem | None, _previous) -> None:
-        if current is not None:
-            self.changeSelected.emit(current.data(0, Qt.UserRole))
+    def _selection_changed(self) -> None:
+        self.selectionMoved.emit(self.selected_positions())

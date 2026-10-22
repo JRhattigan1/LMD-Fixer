@@ -81,14 +81,35 @@ Longer design notes live in `docs/`:
   (in progress; `python -m lmd_fixer.desktop`). `MainWindow` owns one
   `ReviewSession` and calls `_update()` after every step move, which redraws
   everything from the session. Step panels live in `desktop/steps/`, one per
-  `review_mode` (`checklist.py` also serves "sections" until its map lands;
-  `pending.py` stands in for unported steps). Choice edits go through the
+  `review_mode` (`checklist.py` serves "checklist" and "sections",
+  `recipes.py` the P step, `pending.py` stands in for feeds until it's
+  ported). Choice edits go through the
   window's `QUndoStack` (`steps/common.SetAcceptedCommand`), which is cleared
   on each step move. `GCodeView` marks proposals on their lines via
   ExtraSelections; a full-width band per line only for changes under
   `BAND_MAX_LINES`, since Qt draws full width only for an empty cursor and a
   section removal would need thousands. Confirmation prompts go through
   `MainWindow.ask` / `confirm_restart` so tests can answer them.
+- **Desktop bed map** (`desktop/bed_map.py`, `BedMapView`): a
+  `QGraphicsScene` in mm with Y flipped up. Each toolpath has a cosmetic-pen
+  path, a `_Box` click target and an `_Label`; labels ignore the view
+  transform so they stay readable. It re-fits on resize until the user zooms
+  or pans. **Selection on the map is the step list's selection**: the window
+  mirrors one into the other (`_list_selection_moved` /
+  `_map_selection_edited`); `set_selected` doesn't echo back. Space or
+  double-click toggles. This differs from the browser map, where a click
+  toggled. Steps style the map through `MainWindow._choices_changed` →
+  `set_styles`. The colour pairs live in `theme.py` (`REMOVAL_*`,
+  `RECIPE_*`) and were validated. For checklist fixes the map shows a ticked
+  count as a *label*, so no unvalidated colour is added; validate any new
+  map colour before using it. A step's toolpaths map to changes through
+  `toolpath_at_line`. A section change's `original_index` is its
+  toolpath's start line.
+- **Material database dialog** (`desktop/recipe_dialog.py`): a
+  `QStandardItemModel` behind a filter proxy. Cells are text until Save,
+  which runs `recipes.validate_recipes` / `stamp_changed` / `save_recipes`.
+  Don't `blockSignals` on the model while loading: the proxy then never
+  sees the rows and the table stays empty. Use the `_loading` flag.
 - `lmd_fixer/app.py` — Streamlit UI. Runs fixes one at a time in a fixed pipeline
   order (`pipeline.FIX_ORDER`), independent of sidebar tick order. Holds
   `original_program` and `current_program` in `st.session_state` so the

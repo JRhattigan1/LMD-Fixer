@@ -53,7 +53,7 @@ def test_open_lists_the_first_steps_changes(window, sample_file):
 def test_toggle_undo_redo(window, sample_file):
     window.open_file(str(sample_file))
     window.checklist.move(2)
-    window.checklist.toggle_current()
+    window.checklist.toggle_selected()
     assert ticks(window)[2] is False and len(window.session.accepted_indices()) == 10
     window.undo.undo()
     assert ticks(window)[2] is True and len(window.session.accepted_indices()) == 11
@@ -80,7 +80,7 @@ def test_review_keys(window, sample_file):
 def test_selecting_a_change_follows_in_the_code_and_back(window, sample_file):
     window.open_file(str(sample_file))
     change = window.checklist.changes[4]
-    window.checklist.select_position(4)
+    window.checklist.tree.setCurrentItem(window.checklist.tree.topLevelItem(4))
     assert window.code.current_line() == change.original_index
     window.code.go_to_line(window.checklist.changes[7].original_index)
     window.code.lineActivated.emit(window.checklist.changes[7].original_index)
@@ -133,3 +133,106 @@ def test_go_back_to_a_completed_step(window, sample_file, monkeypatch):
     monkeypatch.setattr(window, "ask", lambda title, text: True)
     window.go_to_step(0)
     assert window.session.index == 0
+
+
+# -- phase 3: the bed map, map-driven steps, material database ------------------
+
+ALL_WITH_RECIPES = ["remove_rotary_table", "remove_named_sections", "change_recipes", "remove_repeated_p_calls",
+                    "remove_dwells"]
+
+
+def start_of(w, name):
+    return next(s for s, info in w.map.info.items() if info.name == name)
+
+
+def test_map_draws_every_toolpath_and_maps_lines(window, sample_file):
+    window.open_file(str(sample_file))
+    assert [i.name for i in window.map.info.values()] == ["PATH_A", "PATH_B", "PATH_C"]
+    a = start_of(window, "PATH_A")
+    assert window.map.toolpath_at_line(a + 5) == a
+    assert window.map.toolpath_at_line(0) is None  # header, before any toolpath
+
+
+def test_code_cursor_outlines_its_toolpath(window, sample_file):
+    window.open_file(str(sample_file))
+    b = start_of(window, "PATH_B")
+    window.code.lineActivated.emit(b + 3)
+    assert window.map._boxes[b].focused
+
+
+def test_sections_map_and_list_share_selection(window, sample_file):
+    window.open_file(str(sample_file))
+    window.apply_step()  # rotary -> sections
+    c = start_of(window, "PATH_C")
+    window.map.set_selected([c])
+    window.map.selectionEdited.emit([c])
+    assert [window.checklist.changes[p].label for p in window.checklist.selected_positions()] == ["PATH_C"]
+    # Selecting in the list selects on the map.
+    window.checklist.tree.setCurrentItem(window.checklist.tree.topLevelItem(0))
+    assert window.map.selected() == [start_of(window, "PATH_A")]
+
+
+def test_double_click_on_map_toggles_a_section_and_restyles(window, sample_file):
+    from lmd_fixer.desktop import theme
+
+    window.open_file(str(sample_file))
+    window.apply_step()
+    b = start_of(window, "PATH_B")
+    window.map.toolpathActivated.emit(b)
+    assert window.session.is_accepted(b)
+    assert window.map._paths[b].pen().color().name() == theme.REMOVAL_GONE
+    assert window.map._labels[b].text == "✕"
+    window.undo.undo()
+    assert not window.session.is_accepted(b)
+    assert window.map._paths[b].pen().color().name() == theme.REMOVAL_KEPT
+
+
+def test_recipe_step_set_undo_apply(qtbot, tmp_path, sample_file, monkeypatch):
+    monkeypatch.setenv("LMD_FIXER_RECIPES", str(tmp_path / "recipes.csv"))
+    settings = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    settings.setValue("selected_fixes", ["change_recipes", "remove_repeated_p_calls"])
+    w = MainWindow(settings)
+    qtbot.addWidget(w)
+    w.open_file(str(sample_file))
+    assert w.panels.currentWidget() is w.recipes
+    a, c = start_of(w, "PATH_A"), start_of(w, "PATH_C")
+    # Select on the map, as a box-drag would.
+    w.map.set_selected([a, c])
+    w.map.selectionEdited.emit([a, c])
+    assert w.recipes.selected_starts() == [a, c]
+    w.recipes.new_p.setValue(31)
+    w.recipes.set_selected()
+    assert w.session.choices.options["recipes"] == {a: 31, c: 31}
+    assert w.map._labels[c].text == "P31" and w.map._labels[c].bold
+    assert len(w.session.proposal().changes) == 2
+    w.undo.undo()
+    assert w.session.choices.options["recipes"] == {}
+    w.undo.redo()
+    w.recipes.select_starts([c])
+    w.recipes.reset_selected()
+    assert w.session.choices.options["recipes"] == {a: 31}
+    w.apply_step()
+    assert w.session.result().lines.count("/M98 P0031") == 1
+
+
+def test_material_database_dialog(qtbot, tmp_path, monkeypatch):
+    from lmd_fixer import recipes as R
+    from lmd_fixer.desktop.recipe_dialog import RecipeDialog
+
+    path = tmp_path / "recipes.csv"
+    monkeypatch.setenv("LMD_FIXER_RECIPES", str(path))
+    d = RecipeDialog([20, 21])
+    qtbot.addWidget(d)
+    assert d.model.rowCount() == 0 and d.missing_p() == [20, 21]
+    d.add_missing_rows()
+    assert d.model.rowCount() == 2 and d.dirty
+    power = d.columns.index("Laser power (W)")
+    d.model.item(0, power).setText("1000")
+    assert d.save() and not d.dirty
+    df = R.load_recipes(path)
+    assert list(df["P"]) == [20, 21] and df["Laser power (W)"].iloc[0] == 1000
+    # A bad value is reported, not saved.
+    d.model.item(1, power).setText("lots")
+    assert not d.save()
+    assert "must be a number" in d.errors.text()
+    d.dirty = False  # skip the unsaved-changes prompt on close
