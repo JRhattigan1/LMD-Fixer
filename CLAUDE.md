@@ -77,6 +77,18 @@ Longer design notes live in `docs/`:
   the path (the Windows build points it beside the `.exe`). Only the menu is
   affected — `run_fix` runs any fix named explicitly. The shipped file has
   `adjust_section_feeds = false`.
+- `lmd_fixer/desktop/` — the PySide6 desktop app replacing the Streamlit UI
+  (in progress; `python -m lmd_fixer.desktop`). `MainWindow` owns one
+  `ReviewSession` and calls `_update()` after every step move, which redraws
+  everything from the session. Step panels live in `desktop/steps/`, one per
+  `review_mode` (`checklist.py` also serves "sections" until its map lands;
+  `pending.py` stands in for unported steps). Choice edits go through the
+  window's `QUndoStack` (`steps/common.SetAcceptedCommand`), which is cleared
+  on each step move. `GCodeView` marks proposals on their lines via
+  ExtraSelections; a full-width band per line only for changes under
+  `BAND_MAX_LINES`, since Qt draws full width only for an empty cursor and a
+  section removal would need thousands. Confirmation prompts go through
+  `MainWindow.ask` / `confirm_restart` so tests can answer them.
 - `lmd_fixer/app.py` — Streamlit UI. Runs fixes one at a time in a fixed pipeline
   order (`pipeline.FIX_ORDER`), independent of sidebar tick order. Holds
   `original_program` and `current_program` in `st.session_state` so the
@@ -318,6 +330,13 @@ rotary commands, footer), so they run on a fresh clone. Tests on the real
 files use the `real_file` fixture, which skips when a file isn't present.
 When changing or adding a fix, add a test against the synthetic program, and
 check the real files too.
+
+Desktop tests (`tests/test_desktop.py`, pytest-qt) drive the real widgets
+with Qt's offscreen platform, which `tests/conftest.py` selects. Give
+`MainWindow` a `QSettings` on a temp ini file so tests don't touch the real
+settings. To look at the window, render it offscreen with `widget.grab()`,
+and set `QT_QPA_FONTDIR=C:\Windows\Fonts`, or the offscreen platform draws
+every glyph as a box.
 
 Full-pipeline check against the references (`tests/test_reference_files.py`):
 a `ReviewSession` over `FIX_ORDER`, applying every step with its defaults,

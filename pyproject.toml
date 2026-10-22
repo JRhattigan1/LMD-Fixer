@@ -13,10 +13,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+# The desktop app (in progress; replaces the Streamlit UI when done).
+desktop = ["PySide6-Essentials>=6.7"]
+dev = ["pytest", "pytest-qt", "PySide6-Essentials>=6.7"]
 
 [project.scripts]
 lmd-fixer = "lmd_fixer.cli:main"
+
+[project.gui-scripts]
+lmd-fixer-desktop = "lmd_fixer.desktop.main:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "lmd_fixer.__version__"}

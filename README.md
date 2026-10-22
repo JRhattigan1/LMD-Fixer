@@ -55,6 +55,25 @@ lmd-fixer
 
 (and later `uv tool upgrade lmd-fixer` to pick up updates).
 
+## Desktop app (in progress)
+
+A standalone desktop version, with no browser, is being built to replace
+the Streamlit one. From a checkout:
+
+```
+pip install -e .[desktop]
+python -m lmd_fixer.desktop [FILE]
+```
+
+It already covers opening files (File menu, drag and drop, recent files),
+the Steps list, the highlighted program with proposed changes marked on
+their lines, the accept/reject review with undo, and the final diff and
+save. Keys: J/K move between changes, Space toggles one, A/R accept or
+reject all, Ctrl+Z/Ctrl+Y undo/redo, Ctrl+Enter applies the step. Still to
+come: the bed maps for section removal and P recipes (section removal uses
+the plain list for now), the P recipe and feed steps, and the material
+database.
+
 ## Running from a checkout (development)
 
 ```
@@ -198,6 +217,7 @@ lmd_fixer/
   gcode.py                      GCodeProgram: load/save, line-based model
   pipeline.py                   FIX_ORDER, run_fix / apply_accepted_changes
   review.py                     ReviewSession: the step-by-step review, UI-free
+  desktop/                      the desktop app (PySide6), in progress
   export.py                     output name, O-number sync, CRLF save, diff rows
   settings.py                   reads fix_settings.toml
   recipes.py                    material/recipe database (recipes.csv)
