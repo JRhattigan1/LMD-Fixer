@@ -90,6 +90,9 @@ def _selftest(args: list[str]) -> int:
             apply_theme(app, name)
         settings = QSettings(str(Path(tempfile.mkdtemp()) / "selftest.ini"), QSettings.IniFormat)
         window = MainWindow(settings)
+        from lmd_fixer.desktop.view3d import prepare_window
+
+        prepare_window(window)  # as main() does
         # Nobody is there to dismiss a dialog: a modal one would hang the
         # self-test (and the build waiting on it) forever.
         errors: list[str] = []

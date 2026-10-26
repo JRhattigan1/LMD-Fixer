@@ -9,20 +9,23 @@ always shows the same state.
 
 Built to stay cheap however much is on the bed:
 
-- **A handful of GL items, whatever the toolpath count.** Every deposition
-  path is in one line item with per-vertex colours; an "emphasis" item
-  redraws the selected and changed toolpaths wider; travel, the selection
-  box and the grid are one item each; all labels are drawn by one item in a
-  single QPainter pass. Restyling or selecting only recolours arrays and
-  updates those items in place — nothing is created or destroyed.
+- **A handful of GL items, whatever the toolpath count.** A GL line item
+  has one width, so deposition is one line item per width in use (the
+  style's width, plus `SELECTED_EXTRA_WIDTH` when selected: rarely more
+  than three), with per-vertex colours; travel, the selection box and the
+  grid are one item each; all labels are drawn by one item in a single
+  QPainter pass. Restyling or selecting refills arrays and updates those
+  items in place; an item is only created the first time a width is
+  needed, and kept for reuse.
 - **Nothing happens while hidden.** Loads, styles and selections are stored
   and applied when the 3D tab is next shown.
-- **It survives a new GL context.** pyqtgraph caches compiled shaders and
-  vertex buffers per process, not per context, so when Qt recreates the
-  context (e.g. the window moving to another screen) every draw failed with
-  "invalid value", every frame, and printing those errors froze the app.
-  `_GLView.initializeGL` clears pyqtgraph's shader cache and the items are
-  rebuilt for the new context.
+- **It survives a new GL context.** pyqtgraph caches compiled shaders per
+  process, not per context, so when Qt recreates the context (e.g. the
+  window moving to another screen) every draw failed with "invalid value",
+  every frame, and printing those errors froze the app.
+  `_GLView.initializeGL` clears pyqtgraph's shader cache, and on any
+  context after the first the items (whose buffers belonged to the old
+  one) are rebuilt.
 
 Picking is done in screen space: every deposition segment is projected with
 the camera's own matrices and the nearest one within a few pixels wins,
@@ -51,8 +54,7 @@ SPACE_ZOOM = 0.035
 CLICK_SLOP_PX = 4  # movement below this between press and release is a click
 PICK_TOL_PX = 8
 Z_SCALES = [1, 2, 5, 10]
-BASE_WIDTH = 1.5
-EMPHASIS_WIDTH = 3.0
+SELECTED_EXTRA_WIDTH = 1.5  # selected toolpaths are drawn this much wider, as on the plan map
 
 
 def rgba(colour: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
@@ -103,6 +105,18 @@ def pick_segment(segments: np.ndarray, owners: np.ndarray, mvp: np.ndarray, widt
     return int(owners[near[np.argmin(seg_depth)]])
 
 
+def group_by_width(order: list[int], styles: dict[int, ToolpathStyle], selected: set[int]) -> dict[float, list[int]]:
+    """The toolpaths (by start, in `order`) to draw at each line width: the
+    style's width, plus `SELECTED_EXTRA_WIDTH` when selected."""
+    default = ToolpathStyle().width
+    groups: dict[float, list[int]] = {}
+    for s in order:
+        style = styles.get(s)
+        width = (style.width if style else default) + (SELECTED_EXTRA_WIDTH if s in selected else 0)
+        groups.setdefault(width, []).append(s)
+    return groups
+
+
 def preload() -> None:
     """Imports pyqtgraph's OpenGL support on a background thread, so it's
     ready before anyone opens the 3D tab (importing it takes 1-3 s, which
@@ -118,6 +132,23 @@ def preload() -> None:
             pass
 
     threading.Thread(target=load, name="preload-3d", daemon=True).start()
+
+
+def prepare_window(window: QWidget) -> None:
+    """Gives `window` an empty, hidden OpenGL widget. Call before it's first
+    shown. The first OpenGL widget in a window switches it to an OpenGL
+    surface, and if the window is already on screen Qt does that by hiding
+    it, recreating its native window and showing it again: the window
+    visibly closed and reopened the first time the 3D tab was opened. With
+    this in place from the start, the 3D view's widget arrives into a window
+    that's already OpenGL. It never initialises GL itself and doesn't import
+    pyqtgraph, so startup stays fast."""
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+
+    surface = QOpenGLWidget(window)
+    surface.setObjectName("openglSurface")
+    surface.setFixedSize(0, 0)
+    surface.hide()
 
 
 def reset_pyqtgraph_gl_cache() -> None:
@@ -184,8 +215,10 @@ class View3D(QWidget):
         self._pos = np.zeros((0, 3), dtype=np.float32)
         self._owners = np.zeros(0, dtype=np.int64)  # per segment
         # GL items (created once per context).
-        self._base = self._emphasis = self._travel_item = self._selection_item = None
-        self._labels = self._grid = None
+        self._lines: dict[float, object] = {}  # line width -> deposition drawn at it
+        self._travel_item = self._selection_item = self._labels = self._grid = None
+        self._drawn = 0  # toolpaths in the line items
+        self._gl_initialised = False  # a later initializeGL means a new context
         self._dirty = {"geometry", "style", "selection"}
         self._needs_fit = True
 
@@ -235,9 +268,7 @@ class View3D(QWidget):
     def drawn_toolpaths(self) -> int:
         """How many toolpaths are on screen (0 until the GL view exists and
         has its geometry)."""
-        if self.gl is None or self._base is None or self._base.pos is None or not len(self._base.pos):
-            return 0
-        return len(self._order)
+        return self._drawn if self.gl is not None and self._grid is not None else 0
 
     def segments_and_owners(self) -> tuple[np.ndarray, np.ndarray]:
         """Every deposition segment (scaled as drawn) and its toolpath."""
@@ -297,10 +328,13 @@ class View3D(QWidget):
                 # invalid here (see the module docstring).
                 reset_pyqtgraph_gl_cache()
                 super().initializeGL()
-                if view3d._base is not None:
+                if view3d._gl_initialised:
                     # Items from the old context hold buffers that mean
                     # nothing in this one: replace them before anything draws.
+                    # (Not on the first context: the items were made for it,
+                    # and rebuilding them doubled the 3D tab's first open.)
                     view3d._recreate_items()
+                view3d._gl_initialised = True
 
             def mousePressEvent(self, ev):
                 self._press = ev.position()
@@ -333,32 +367,41 @@ class View3D(QWidget):
 
         self._grid = gl.GLGridItem()
         self._travel_item = gl.GLLinePlotItem(mode="lines", width=1, antialias=True)
-        self._base = gl.GLLinePlotItem(mode="lines", width=BASE_WIDTH, antialias=True)
-        self._emphasis = gl.GLLinePlotItem(mode="lines", width=EMPHASIS_WIDTH, antialias=True)
         self._selection_item = gl.GLLinePlotItem(mode="lines", width=1.5, antialias=True)
         self._labels = _LabelLayer()
         self._labels.setDepthValue(10)  # drawn last, over everything
-        for item in (self._grid, self._travel_item, self._base, self._emphasis, self._selection_item,
-                     self._labels):
+        for item in (self._grid, self._travel_item, self._selection_item, self._labels):
             self.gl.addItem(item)
+
+    def _line_item(self, width: float):
+        """The deposition item drawn at `width`, made the first time it's needed."""
+        item = self._lines.get(width)
+        if item is None:
+            import pyqtgraph.opengl as gl
+
+            item = gl.GLLinePlotItem(mode="lines", width=width, antialias=True)
+            item.setDepthValue(min(width, 9))  # wider drawn later, over narrower; labels stay on top
+            self.gl.addItem(item)
+            self._lines[width] = item
+        return item
 
     def _recreate_items(self) -> None:
         """After a context change: drop the old items' (now invalid) buffers."""
         if self.gl is None:
             return
-        for item in (self._grid, self._travel_item, self._base, self._emphasis, self._selection_item,
-                     self._labels):
+        for item in (self._grid, self._travel_item, self._selection_item, self._labels, *self._lines.values()):
             if item is not None and item in self.gl.items:
                 self.gl.removeItem(item)
+        self._lines.clear()
         self._create_items()
         self._dirty |= {"geometry", "style", "selection"}
         self._sync()
 
     def _sync(self) -> None:
         """Applies whatever changed since the last time the view was shown."""
-        # _base is None between the GL view being placed (which re-shows this
+        # _grid is None between the GL view being placed (which re-shows this
         # widget) and its items being created.
-        if self.gl is None or self._base is None or not self.isVisible() or not self._dirty:
+        if self.gl is None or self._grid is None or not self.isVisible() or not self._dirty:
             return
         dirty, self._dirty = self._dirty, set()
         if "geometry" in dirty:
@@ -377,7 +420,6 @@ class View3D(QWidget):
         travel = self._scaled(self.travel).reshape(-1, 3) if len(self.travel) else self._empty()
         self._travel_item.setData(pos=travel, color=rgba(theme.TRAVEL, 0.4))
         self._travel_item.setVisible(self.show_travel.isChecked() and len(travel) > 0)
-        self._base.setData(pos=self._pos if len(self._pos) else self._empty())
         self._grid.resetTransform()
         if self.boxes:
             lo = np.min([b[0] for b in self.boxes.values()], axis=0)
@@ -390,31 +432,36 @@ class View3D(QWidget):
         self._grid.setColor((g.red(), g.green(), g.blue(), 26))
 
     def _apply_style(self) -> None:
-        """Recolours the one deposition item and refills the emphasis item and
-        labels — arrays only, no GL objects created."""
+        """Recolours the deposition and refills one line item per width in use,
+        and the labels: arrays only, plus an item the first time a width is
+        needed."""
         default = rgba(theme.NEUTRAL)
         colours = np.empty((len(self._pos), 4), dtype=np.float32)
-        emph_pos, emph_col, labels = [], [], []
+        labels = []
         k = self._zk()
         for s in self._order:
             a, b = self._vertex_range[s]
             style = self.styles.get(s)
-            colour = rgba(style.colour) if style and style.colour else default
-            colours[a:b] = colour
-            if (style and style.width > BASE_WIDTH) or s in self._selected:
-                emph_pos.append(self._pos[a:b])
-                emph_col.append(colours[a:b])
+            colours[a:b] = rgba(style.colour) if style and style.colour else default
             if style and style.label:
                 lo, hi = self.boxes[s]
                 labels.append(((float(lo[0] + hi[0]) / 2, float(lo[1] + hi[1]) / 2, float(hi[2] * k + 2)),
                                style.label, style.label_bold))
-        if len(colours):
-            self._base.setData(color=colours)
-        if emph_pos:
-            self._emphasis.setData(pos=np.concatenate(emph_pos), color=np.concatenate(emph_col))
-            self._emphasis.setVisible(True)
-        else:
-            self._emphasis.setVisible(False)
+        groups = group_by_width(self._order, self.styles, self._selected)
+        for width, starts in groups.items():
+            if len(starts) == len(self._order):  # the usual case: everything at one width
+                pos, col = self._pos, colours
+            else:
+                ranges = [self._vertex_range[s] for s in starts]
+                pos = np.concatenate([self._pos[a:b] for a, b in ranges])
+                col = np.concatenate([colours[a:b] for a, b in ranges])
+            item = self._line_item(width)
+            item.setData(pos=pos, color=col)
+            item.setVisible(True)
+        for width, item in self._lines.items():
+            if width not in groups:
+                item.setVisible(False)
+        self._drawn = len(self._order)
         self._labels.set_labels(labels)
 
     def _apply_selection(self) -> None:

@@ -58,11 +58,12 @@ def main(argv: list[str] | None = None) -> int:
     app.setWindowIcon(app_icon())
     install_crash_handler()
     apply_theme(app, QSettings().value("theme", DEFAULT_THEME))
+    from lmd_fixer.desktop.view3d import prepare_window, preload
+
     window = MainWindow()
+    prepare_window(window)  # before show(), or opening 3D recreates the window
     window.show()
     window.start_spacemouse()
-    from lmd_fixer.desktop.view3d import preload
-
     preload()
     files = [a for a in argv[1:] if not a.startswith("-")]
     if files:

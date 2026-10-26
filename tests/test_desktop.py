@@ -270,6 +270,22 @@ def test_pick_segment_nearest_then_closest_to_camera():
     assert pick_segment(segs, owners, mvp, 100, 100, 50, 35) is None  # nothing within 8 px
 
 
+def test_3d_line_widths_follow_the_style_plus_selection():
+    """Regression: the 3D view drew everything wider than the default at one
+    "emphasis" width, so in the sections step (every section styled 2.0) a
+    selected section was no thicker than the rest."""
+    from lmd_fixer.desktop.bed_map import ToolpathStyle
+    from lmd_fixer.desktop.view3d import group_by_width
+
+    sections = {s: ToolpathStyle(width=2.0) for s in (10, 20, 30)}
+    assert group_by_width([10, 20, 30], sections, {20}) == {2.0: [10, 30], 3.5: [20]}
+    # Unstyled toolpaths use the default width; a new P (3.0) stays wider
+    # than its neighbours, and wider still when selected.
+    recipes = {20: ToolpathStyle(width=3.0), 30: ToolpathStyle(width=3.0)}
+    assert group_by_width([10, 20, 30], recipes, {30}) == {1.5: [10], 3.0: [20], 4.5: [30]}
+    assert group_by_width([10, 20], {}, set()) == {1.5: [10, 20]}
+
+
 def test_selecting_in_3d_selects_on_the_map_and_in_the_list(window, sample_file):
     window.open_file(str(sample_file))
     window.apply_step()  # sections
@@ -326,6 +342,20 @@ def test_theme_switch_applies_and_is_remembered(window, sample_file):
         kept = window.map._paths[start_of(window, "PATH_A")].pen().color().name()
         assert kept == theme.REMOVAL_KEPT
     window.set_theme("Dark")
+
+
+def test_theme_switch_after_the_review_is_finished(window, sample_file):
+    """Regression: the hidden code view kept the last step's changes and, on
+    a theme change, asked the finished session whether they were accepted
+    (an AttributeError: the session has no current fix)."""
+    window.open_file(str(sample_file))
+    while not window.session.finished:
+        window.apply_step()
+    window.set_theme("Light")
+    window.set_theme("Dark")
+    # Back into the last step still marks its changes.
+    window.back_step()
+    assert window.code._changes
 
 
 def test_unticked_rows_still_show_a_tick_box(window, sample_file):

@@ -604,6 +604,10 @@ class MainWindow(QMainWindow):
         )
 
         if session.finished:
+            # The code view is hidden now, but a theme change still repaints
+            # it: forget the last step's changes, whose acceptance it would
+            # ask a finished session (which has no current fix) about.
+            self.code.show_changes([], lambda _: True)
             self.top.setCurrentWidget(self.diff)
             self.diff.set_rows(diff_rows(session.original.lines, session.current.lines))
             self.panels.setCurrentWidget(self.final)
