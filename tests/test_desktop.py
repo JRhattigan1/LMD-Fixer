@@ -6,11 +6,28 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pytestqt")
 
 from PySide6.QtCore import QSettings, Qt  # noqa: E402
+from PySide6.QtGui import QColor  # noqa: E402
 
 from lmd_fixer.desktop.main_window import MainWindow  # noqa: E402
 from tests.conftest import build_sample  # noqa: E402
 
 FIXES = ["remove_rotary_table", "remove_named_sections", "remove_repeated_p_calls", "remove_dwells"]
+
+
+@pytest.fixture(autouse=True)
+def delete_windows_afterwards(qtbot):
+    """Deletes each test's top-level widgets when it ends. Qt otherwise keeps
+    them all alive, and every later theme switch restyles every one of them:
+    theme tests near the end of the run took 30 s instead of 2."""
+    yield
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    for widget in QApplication.topLevelWidgets():
+        if widget.parent() is None:
+            widget.close()
+            widget.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 @pytest.fixture
@@ -104,7 +121,7 @@ def test_finish_and_save_syncs_o_number_and_writes_crlf(window, sample_file, tmp
         window.apply_step()
     assert window.panels.currentWidget() is window.final
     assert window.top.currentWidget() is window.diff
-    assert window.diff.model_.rowCount() > 0
+    assert window.diff.view.model_.rowCount() > 0
     assert window.final.name.text() == "fixed_O1234.ptp"
     assert window.act_save.isEnabled()
     out = tmp_path / "O5555 fixed.ptp"
@@ -365,3 +382,150 @@ def test_unticked_rows_still_show_a_tick_box(window, sample_file):
     tree = window.checklist.tree
     assert all(tree.topLevelItem(i).data(0, Qt.CheckStateRole) is not None
                for i in range(tree.topLevelItemCount()))
+
+
+# -- navigating the change list ---------------------------------------------------
+
+def shown_rows(w):
+    return [w.checklist.changes[p] for p in w.checklist.shown_positions()]
+
+
+def test_filter_narrows_the_list_and_tick_all_acts_on_what_is_shown(window, sample_file):
+    window.open_file(str(sample_file))  # rotary step: 11 changes, all ticked
+    panel = window.checklist
+    panel.filter.setText("a0.0")  # the G90 G0 A0.0 axis-zero moves, one per toolpath
+    assert len(shown_rows(window)) == 3
+    assert all("A0.0" in c.original_text for c in shown_rows(window))
+    assert panel.reject_all.text() == "Untick shown"
+    panel.set_all(False)
+    assert len(window.session.accepted_indices()) == 8  # only the 3 shown were unticked
+    # J/K only visit rows that are shown.
+    panel.tree.setCurrentItem(panel._items[0])
+    panel.move(1)
+    assert panel.current_position() in panel.shown_positions()
+    window.undo.undo()
+    assert len(window.session.accepted_indices()) == 11
+    panel.filter.clear()
+    assert len(shown_rows(window)) == 11 and panel.reject_all.text() == "Untick all"
+
+
+def test_filter_clears_on_the_next_step(window, sample_file):
+    window.open_file(str(sample_file))
+    window.checklist.filter.setText("M337")
+    window.apply_step()
+    assert window.checklist.filter.text() == ""
+
+
+def test_grouping_by_toolpath_names_every_change_and_ticks_a_toolpath_at_once(window, sample_file):
+    window.open_file(str(sample_file))
+    panel = window.checklist
+    # Rotary changes don't name their toolpath; the window fills it in.
+    assert all(panel.toolpath_of(c) for c in panel.changes)
+    panel.group.setChecked(True)
+    headings = [panel.tree.topLevelItem(i) for i in range(panel.tree.topLevelItemCount())]
+    assert [h.text(2) for h in headings] == ["PATH_A", "PATH_B", "PATH_C"]
+    assert sum(h.childCount() for h in headings) == 11
+    # Unticking a heading unticks its changes, as one undo step.
+    headings[0].setCheckState(0, Qt.Unchecked)
+    assert len(window.session.accepted_indices()) == 11 - headings[0].childCount()
+    assert headings[1].checkState(0) == Qt.Checked
+    window.undo.undo()
+    assert len(window.session.accepted_indices()) == 11
+    assert headings[0].checkState(0) == Qt.Checked
+    # Selecting a heading selects its toolpath on the map.
+    panel.tree.clearSelection()
+    headings[1].setSelected(True)
+    assert window.map.selected() == [start_of(window, "PATH_B")]
+    # Remembered, and off in the sections step.
+    assert window.settings.value("checklist/group") == "true"
+    window.apply_step()
+    assert not panel.group.isVisible() and panel.tree.topLevelItemCount() == 3
+    assert panel.tree.topLevelItem(0).data(0, Qt.UserRole) == 0  # plain rows, no headings
+
+
+def test_scrollbar_marks_every_change(window, sample_file):
+    window.open_file(str(sample_file))
+    window.code.resize(600, 900)
+    window.code.show()
+    marks = window.code.verticalScrollBar().marks()
+    assert 1 <= len(marks) <= 11
+    tops = sorted(top for top, _, _ in marks)
+    assert tops == sorted(set(tops))
+    window.checklist.set_all(False)  # unticked changes are marked faintly
+    from lmd_fixer.desktop import theme
+
+    assert {colour.name() for _, _, colour in window.code.verticalScrollBar().marks()} == {QColor(theme.FAINT).name()}
+
+
+# -- the final screen -----------------------------------------------------------
+
+def finish(window, sample_file):
+    window.open_file(str(sample_file))
+    while not window.session.finished:
+        window.apply_step()
+
+
+def test_final_diff_steps_between_changes_and_can_show_only_them(window, sample_file):
+    finish(window, sample_file)
+    diff = window.diff
+    assert diff.runs
+    diff.step(1)
+    first, last = diff.runs[0]
+    assert diff.current_run == 0 and diff.position.text() == f"Change 1 of {len(diff.runs)}"
+    assert diff.view.selectionModel().isRowSelected(first)
+    diff.step(-1)
+    assert diff.current_run == 0  # stays on the first
+    diff.changes_only.setChecked(True)
+    rows = diff.view.model_.rows
+    assert all(diff.view.isRowHidden(r) == (row.tag not in ("delete", "insert", "replace"))
+               for r, row in enumerate(rows))
+
+
+def test_final_diff_colours_follow_the_theme(window, sample_file):
+    finish(window, sample_file)
+    model = window.diff.view.model_
+    row = next(r for r, d in enumerate(model.rows) if d.tag == "delete")
+    window.set_theme("Light")
+    light = model.data(model.index(row, 1), Qt.BackgroundRole)
+    window.set_theme("Vivid")
+    vivid = model.data(model.index(row, 1), Qt.BackgroundRole)
+    assert light.alpha() != vivid.alpha()  # each theme's own mark strength
+    window.set_theme("Dark")
+
+
+def test_after_saving_another_file_opens_without_asking(window, sample_file, tmp_path, monkeypatch):
+    finish(window, sample_file)
+    asked = []
+    monkeypatch.setattr(window, "ask", lambda *a: asked.append(a) or False)
+    assert not window.open_file(str(sample_file))  # unsaved: asks (and we said no)
+    assert asked
+    out = tmp_path / "out.ptp"
+    window.save_to(str(out))
+    assert window.final.saved.isVisibleTo(window.final) and str(out) in window.final.saved_label.text()
+    asked.clear()
+    opened = []
+    monkeypatch.setattr("lmd_fixer.desktop.main_window.QFileDialog.getOpenFileName",
+                        lambda parent, title, start, filt: opened.append(start) or ("", ""))
+    window.final.another.click()
+    assert opened == [str(tmp_path)]  # the dialog starts where it was saved
+    assert window.open_file(str(sample_file)) and not asked
+    assert window.session.index == 0
+
+
+def test_a_step_key_pressed_during_slow_work_is_dropped(window, sample_file, monkeypatch):
+    window.open_file(str(sample_file))
+    window._busy = True  # as while a step is being applied
+    window.act_apply.trigger()
+    assert window.session.index == 0
+    window._busy = False
+    # Just after slow work: a press typed during it arrives now, and is dropped.
+    window._quiet_until = float("inf")
+    window.act_apply.trigger()
+    assert window.session.index == 0
+    window._quiet_until = 0.0
+    window.act_apply.trigger()
+    assert window.session.index == 1
+    # ...and the step it applied starts a quiet spell of its own.
+    assert window._quiet_until > 0
+    window.act_apply.trigger()
+    assert window.session.index == 1

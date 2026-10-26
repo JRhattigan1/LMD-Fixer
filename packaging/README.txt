@@ -24,7 +24,11 @@ Using it
 - Open a program with File > Open, or drag it onto the window.
 - Switch the fixes you want on or off in the list on the left.
 - Review each step, then press Apply step. Back undoes a step.
-- At the end, check the side-by-side comparison and press Save.
+  Filter changes (Ctrl+F) narrows a long list, and Group by toolpath ticks
+  or unticks a whole toolpath at once.
+- At the end, check the side-by-side comparison (N jumps to the next
+  change) and press Save. Then Open folder shows the saved file, and Fix
+  another file opens the next one.
 
 Help > Keyboard and mouse lists every shortcut. The Dark / Light / Vivid
 buttons at the top right change the look. A 3Dconnexion SpaceMouse moves the

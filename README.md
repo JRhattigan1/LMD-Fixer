@@ -78,22 +78,37 @@ on machines that don't have them.
      pulls stacked layers apart. Drag to orbit, Ctrl- or middle-drag to pan,
      scroll to zoom, click to select.
    - The **program** sits beside them, with each proposed change marked on
-     its lines.
+     its lines. Marks down its scrollbar show where every change is in the
+     program.
    - The **list** of changes is below. Selecting in any of these selects the
      same thing in the others.
+     - **Filter changes…** (Ctrl+F) narrows the list to rows containing what
+       you type: a toolpath name, a line number, `A0.0`, and so on. Esc
+       clears it. While it's filtered, **Tick shown** / **Untick shown**
+       (A / R) act on just those rows.
+     - **Group by toolpath** lists the changes under a heading per
+       toolpath, whose tick box ticks or unticks the whole toolpath. The app
+       remembers the setting.
    - Most fixes start with every change ticked. Section removal starts with
      nothing ticked, and the P recipe step changes nothing until you set a
      P.
    - **Space** (or double-clicking a toolpath) flips the selected rows, and
      Ctrl+Z undoes.
    - **Apply step** (Ctrl+Enter) moves on, **Skip** moves on without
-     changing anything, and **Back** undoes the previous step.
+     changing anything, and **Back** undoes the previous step. On a big
+     program a step can take a few seconds. The cursor shows it's working,
+     and pressing Apply again meanwhile won't apply the next step too.
    - Double-click a finished step in the sidebar to go back to it.
    - Changing which fixes are switched on part-way through restarts the
      review from the original file, so the app asks first.
 4. **Save:** when every step is done you get a summary and a side-by-side
    diff of the original against the result.
-   - Save (Ctrl+S) suggests `fixed_<original name>`.
+   - **Next change** / **Previous change** (N / Shift+N) step through the
+     diff, and **Changes only** hides the unchanged lines around them.
+   - Save (Ctrl+S) suggests `fixed_<original name>`. Once it's saved,
+     **Open folder** shows the file in Explorer. **Fix another file…** opens
+     the next program, starting in the same folder, without asking about
+     the finished review.
    - If the name you choose contains an O-number such as `O1162`, the
      program's `Oxxxx` header line is rewritten to match.
    - Files are always saved with CRLF line endings, as the controller

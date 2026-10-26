@@ -125,6 +125,34 @@ project (closed-loop layer-height correction). It isn't part of this app.
     cleared on each step move.
   - Confirmation prompts go through `MainWindow.ask` / `confirm_restart`,
     so tests can answer them.
+  - **Slow work shows it's working.** Step moves and opening a file run
+    inside `_working(message)`: a wait cursor and a status message. Step
+    keys and buttons are wired through `_from_user`, which ignores them
+    while busy and for `QUIET_AFTER_WORK_S` afterwards, so a Ctrl+Enter
+    typed during a long step doesn't apply the next one too. Tests call
+    `apply_step()` etc. directly, which aren't guarded. It's time-based
+    rather than a zero-timer because the ordering of queued Windows input
+    against Qt timers couldn't be relied on.
+- **The checklist panel** (`steps/checklist.py`) keeps its rows in `_items`,
+  indexed by change position, whether they're top-level or grouped under
+  toolpath headings. Use it, not `tree.topLevelItem(pos)`.
+  - Headings carry `None` as their position and their children's
+    positions under `CHILDREN`. A selected heading counts as all of its
+    changes, and ticking it is one undo step.
+  - Grouping ("Group by toolpath") is a remembered `QSettings` toggle, off
+    by default and never used in the sections step. Toolpath names come
+    from `change.label`, or from the window's `toolpath_of_change` for fixes
+    that don't set it (rotary removal).
+  - The filter hides rows with `setHidden`, so positions never change. J/K
+    skip hidden rows, and Tick/Untick all act on the shown rows while it's
+    active. Grouped columns must be re-fitted (`_fit_columns`), or the
+    indent pushes the tick boxes out of sight.
+- **The final screen** (`final_view.py`): `DiffPanel` wraps the diff with
+  Next/Previous change (runs of changed rows, `change_runs`) and "Changes
+  only". Diff colours are read at draw time (`diff_background`), so they
+  follow the theme. After a save, `FinalPanel.show_saved` offers Open
+  folder and Fix another file. `MainWindow._saved` then lets `open_file`
+  skip the discard prompt; any `_update()` clears it.
 - **Changing the fix selection mid-review asks before discarding.** The
   review restarts from the original file whenever the chosen fixes change,
   because the program has already been through the fixes behind the current
@@ -143,6 +171,8 @@ project (closed-loop layer-height correction). It isn't part of this app.
     change's cost on a 10,000-line program.
   - `set_lines` blocks the view's own signals while loading, and undo is
     off (the view is read-only, and undo history was a third of each load).
+  - Its scrollbar (`_MarkedScrollBar`) draws a tick per change down the
+    groove, merged per pixel, in the gutter's colours (`mark_colour`).
 - **Selection is shared.** The plan map, the 3D view, the step list and
   the code cursor all show the same selection:
   - The window mirrors each into the others (`_list_selection_moved`,
@@ -386,7 +416,10 @@ Run `python -m pytest` (install with `pip install -e .[dev]`).
 - **Desktop tests** (`tests/test_desktop.py`, pytest-qt) drive the real
   widgets with Qt's offscreen platform, which `tests/conftest.py` selects.
   Give `MainWindow` a `QSettings` on a temp ini file so tests don't touch the
-  real settings. Exceptions raised in slots fail the test.
+  real settings. Exceptions raised in slots fail the test. An autouse
+  fixture deletes each test's top-level widgets afterwards. Without it,
+  every theme switch restyled all the windows left over from earlier
+  tests, and theme tests late in the run took 30 s instead of 2.
 - **To look at the window,** render it offscreen with `widget.grab()` and set
   `QT_QPA_FONTDIR=C:\Windows\Fonts`; otherwise every glyph is drawn as a box.
   Check all three themes after a visual change.

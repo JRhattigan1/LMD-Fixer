@@ -15,7 +15,15 @@ from PySide6.QtGui import (
     QTextCursor,
     QTextFormat,
 )
-from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QPlainTextEdit,
+    QScrollBar,
+    QStyle,
+    QStyleOptionSlider,
+    QTextEdit,
+    QToolTip,
+    QWidget,
+)
 
 from lmd_fixer.desktop import theme
 from lmd_fixer.fixes import SECTION_MARKER_RE, LineChange
@@ -86,6 +94,57 @@ class _Gutter(QWidget):
         self.view.paint_gutter(event)
 
 
+class _MarkedScrollBar(QScrollBar):
+    """The vertical scrollbar, with a tick down its groove for every proposed
+    change (coloured like the gutter marks), so you can see where they sit
+    in a long program and drag or click straight to them."""
+
+    MIN_MARK_PX = 2
+
+    def __init__(self, view: "GCodeView") -> None:
+        super().__init__(Qt.Vertical, view)
+        self.view = view
+
+    def groove(self) -> QRect:
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        rect = self.style().subControlRect(QStyle.CC_ScrollBar, option, QStyle.SC_ScrollBarGroove, self)
+        return rect if rect.height() > 0 else self.rect()
+
+    def marks(self) -> list[tuple[int, int, QColor]]:
+        """(top, height, colour) of each tick, in this widget's pixels. One
+        per distinct pixel run, so thousands of changes cost no more than
+        the groove's height."""
+        view = self.view
+        if not view._changes:
+            return []
+        groove = self.groove()
+        lines = max(1, view.blockCount())
+        seen: dict[tuple[int, int], QColor] = {}
+        for c in view._changes:
+            top = groove.top() + int(c.original_index / lines * groove.height())
+            bottom = groove.top() + int((c.end_index + 1) / lines * groove.height())
+            height = max(self.MIN_MARK_PX, bottom - top)
+            colour = view.mark_colour(c)
+            key = (top, height)
+            # Where ticks share pixels, an accepted change shows over a rejected one.
+            if key not in seen or seen[key] == QColor(theme.FAINT):
+                seen[key] = colour
+        return [(top, height, colour) for (top, height), colour in seen.items()]
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        marks = self.marks()
+        if not marks:
+            return
+        groove = self.groove()
+        painter = QPainter(self)
+        x, width = groove.left() + 2, max(2, groove.width() - 4)
+        for top, height, colour in marks:
+            painter.fillRect(x, top, width, height, colour)
+        painter.end()
+
+
 BAND_MAX_LINES = 40
 
 
@@ -110,6 +169,7 @@ class GCodeView(QPlainTextEdit):
         self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.highlighter = GCodeHighlighter(self.document())
         self._gutter = _Gutter(self)
+        self.setVerticalScrollBar(_MarkedScrollBar(self))
         self._changes: list[LineChange] = []
         self._cursors: list = []  # per change, see _change_cursors
         self._accepted: Callable[[int], bool] = lambda i: True
@@ -140,6 +200,7 @@ class GCodeView(QPlainTextEdit):
             self.blockSignals(False)
         self._update_gutter_width()
         self._gutter.update()
+        self.verticalScrollBar().update()
 
     def show_changes(self, changes: list[LineChange], is_accepted: Callable[[int], bool],
                      current: int | None = None) -> None:
@@ -229,6 +290,7 @@ class GCodeView(QPlainTextEdit):
                 band.cursor = cursor
                 selections.append(band)
         self.setExtraSelections(selections)
+        self.verticalScrollBar().update()  # its change marks
 
     def refresh_theme(self) -> None:
         self.highlighter.reload()
@@ -283,6 +345,13 @@ class GCodeView(QPlainTextEdit):
 
     # -- gutter --------------------------------------------------------------------
 
+    def mark_colour(self, change: LineChange) -> QColor:
+        """A change's mark in the gutter and on the scrollbar: red removal,
+        amber modification, faint when rejected."""
+        if not self._accepted(change.original_index):
+            return QColor(theme.FAINT)
+        return QColor(theme.REMOVE_MARK if change.kind == "removed" else theme.MODIFY_MARK)
+
     def gutter_width(self) -> int:
         digits = len(str(max(1, self.blockCount())))
         return 14 + self.fontMetrics().horizontalAdvance("9") * digits
@@ -317,11 +386,7 @@ class GCodeView(QPlainTextEdit):
             if block.isVisible() and bottom >= event.rect().top():
                 pos = self._change_at_line.get(number)
                 if pos is not None:
-                    c = self._changes[pos]
-                    colour = theme.REMOVE_MARK if c.kind == "removed" else theme.MODIFY_MARK
-                    if not self._accepted(c.original_index):
-                        colour = QColor(theme.FAINT)
-                    painter.fillRect(0, top, 3, bottom - top, colour)
+                    painter.fillRect(0, top, 3, bottom - top, self.mark_colour(self._changes[pos]))
                 painter.setPen(QColor(theme.TEXT if number == current else theme.FAINT))
                 painter.drawText(0, top, width - 6, height, Qt.AlignRight, str(number + 1))
             block = block.next()

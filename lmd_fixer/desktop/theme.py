@@ -49,6 +49,7 @@ class Theme:
     ACCENT_TEXT: str
     ACCENT_2: str  # second stop of the primary button (same as ACCENT unless vivid)
     SUCCESS: str
+    WARNING: str  # warning text (>= 4.5:1 on CARD)
     FOCUS: str  # selection outlines on the maps
     # Code
     SYN_G: str
@@ -75,7 +76,7 @@ THEMES = {
         WINDOW="#1e1e20", SIDEBAR="#28282b", CARD="#232326", FIELD="#2c2c2f", RAISED="#3a3a3d",
         CANVAS="#18181a", SEPARATOR="#38383b",
         TEXT="#f2f2f7", DIM="#a1a1a6", FAINT="#6e6e73",
-        ACCENT="#0a84ff", ACCENT_TEXT="#ffffff", ACCENT_2="#0a84ff", SUCCESS="#30d158", FOCUS="#f5f5f7",
+        ACCENT="#0a84ff", ACCENT_TEXT="#ffffff", ACCENT_2="#0a84ff", SUCCESS="#30d158", WARNING="#e3b341", FOCUS="#f5f5f7",
         SYN_G="#6cb6ff", SYN_M="#d2a8ff", SYN_F="#ffb86b", SYN_P="#7ee787", SYN_O="#64d2ff",
         SYN_COMMENT="#7c7c82", SYN_MARKER="#64d2ff",
         NEUTRAL="#6c7480", TRAVEL="#8e8e93",
@@ -87,7 +88,7 @@ THEMES = {
         WINDOW="#f5f5f7", SIDEBAR="#ebebee", CARD="#ffffff", FIELD="#ffffff", RAISED="#ffffff",
         CANVAS="#ffffff", SEPARATOR="#d9d9de",
         TEXT="#1d1d1f", DIM="#6e6e73", FAINT="#aeaeb2",
-        ACCENT="#007aff", ACCENT_TEXT="#ffffff", ACCENT_2="#007aff", SUCCESS="#28a745", FOCUS="#1d1d1f",
+        ACCENT="#007aff", ACCENT_TEXT="#ffffff", ACCENT_2="#007aff", SUCCESS="#28a745", WARNING="#8a5a00", FOCUS="#1d1d1f",
         SYN_G="#0b4f9e", SYN_M="#9b2393", SYN_F="#b35a00", SYN_P="#1e7d32", SYN_O="#0e6b8a",
         SYN_COMMENT="#8a8a8e", SYN_MARKER="#0e6b8a",
         NEUTRAL="#9aa1ab", TRAVEL="#aeaeb2",
@@ -99,7 +100,7 @@ THEMES = {
         WINDOW="#1a0b38", SIDEBAR="#271055", CARD="#211049", FIELD="#2e1663", RAISED="#3b1d7c",
         CANVAS="#120726", SEPARATOR="#43228a",
         TEXT="#fff4fb", DIM="#c9b6ff", FAINT="#8f7bd6",
-        ACCENT="#ff2d95", ACCENT_TEXT="#ffffff", ACCENT_2="#ff9f0a", SUCCESS="#32d74b", FOCUS="#00e5ff",
+        ACCENT="#ff2d95", ACCENT_TEXT="#ffffff", ACCENT_2="#ff9f0a", SUCCESS="#32d74b", WARNING="#ffd60a", FOCUS="#00e5ff",
         SYN_G="#00e5ff", SYN_M="#ff6ad5", SYN_F="#ffd60a", SYN_P="#9dff5c", SYN_O="#ff9f0a",
         SYN_COMMENT="#9d86e0", SYN_MARKER="#ff9f0a",
         NEUTRAL="#7b6aa8", TRAVEL="#9d86e0",
@@ -111,7 +112,7 @@ THEMES = {
 # Current theme's tokens, as module globals (see module docstring). Set by use().
 current: Theme = THEMES[DEFAULT_THEME]
 WINDOW = SIDEBAR = CARD = FIELD = RAISED = CANVAS = SEPARATOR = ""
-TEXT = DIM = FAINT = ACCENT = ACCENT_TEXT = ACCENT_2 = SUCCESS = FOCUS = ""
+TEXT = DIM = FAINT = ACCENT = ACCENT_TEXT = ACCENT_2 = SUCCESS = WARNING = FOCUS = ""
 SYN_G = SYN_M = SYN_F = SYN_P = SYN_O = SYN_COMMENT = SYN_MARKER = ""
 NEUTRAL = TRAVEL = REMOVAL_KEPT = REMOVAL_GONE = RECIPE_UNCHANGED = RECIPE_CHANGED = ""
 MARK_ALPHA = 70

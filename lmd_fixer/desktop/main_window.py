@@ -4,9 +4,11 @@ on another, with the step's buttons in a bar beneath."""
 
 from __future__ import annotations
 
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QEventLoop, QSettings, Qt
 from PySide6.QtGui import QAction, QColor, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QApplication,
@@ -30,7 +32,7 @@ from PySide6.QtWidgets import (
 from lmd_fixer import __version__
 from lmd_fixer.desktop import theme
 from lmd_fixer.desktop.bed_map import BedMapView, ToolpathStyle
-from lmd_fixer.desktop.final_view import DiffView, FinalPanel
+from lmd_fixer.desktop.final_view import DiffPanel, FinalPanel
 from lmd_fixer.desktop.recipe_dialog import RecipeDialog
 from lmd_fixer.desktop.gcode_view import GCodeView
 from lmd_fixer.desktop.steps.checklist import ChecklistPanel
@@ -45,6 +47,9 @@ from lmd_fixer.gcode import GCodeProgram
 from lmd_fixer.review import ReviewSession, ordered_fix_ids
 from lmd_fixer.settings import settings_path
 
+# Step keys are ignored for this long after slow work ends: presses typed
+# while it ran are delivered then, and shouldn't apply the next step too.
+QUIET_AFTER_WORK_S = 0.25
 FILE_FILTER = "G-code programs (*.ptp *.nc *.gcode *.txt);;All files (*)"
 MAX_RECENT = 8
 # Review modes the checklist panel handles; "sections" rows are whole
@@ -130,6 +135,8 @@ SHORTCUTS = [
     ("Space", "Tick or untick the selected changes"),
     ("A / R", "Tick / untick every change"),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+F", "Filter the list of changes (Esc clears it)"),
+    ("N / Shift+N", "Next / previous change in the final comparison"),
     ("Ctrl+M", "Material database"),
     ("F", "Fit the plan view (when it has focus)"),
     ("Mouse", "Plan: wheel zooms, right/middle-drag pans, drag a box to select"),
@@ -145,6 +152,9 @@ class MainWindow(QMainWindow):
         self.session: ReviewSession | None = None
         self.path = ""
         self.output_name = ""
+        self._busy = False  # slow work running; see _working
+        self._quiet_until = 0.0  # time.monotonic() before which step keys are ignored
+        self._saved = False  # the finished review has been saved
         self.undo = QUndoStack(self)
         self.setWindowTitle("LMD Fixer")
         self.setAcceptDrops(True)
@@ -155,7 +165,7 @@ class MainWindow(QMainWindow):
         self.welcome = Welcome(self)
         self.map = BedMapView()
         self.code = GCodeView()
-        self.diff = DiffView()
+        self.diff = DiffPanel()
         self.map_and_code = QSplitter(Qt.Horizontal)
         self.map_and_code.setObjectName("map_and_code")
         # Plan view and 3D share styles and selection; see _show_selection.
@@ -175,7 +185,7 @@ class MainWindow(QMainWindow):
         self.top.addWidget(self.diff)
         self.top_card = card(self.top)
 
-        self.checklist = ChecklistPanel(self.undo)
+        self.checklist = ChecklistPanel(self.undo, self.settings)
         self.recipes = RecipesPanel(self.undo)
         self.final = FinalPanel()
         self.panels = QStackedWidget()
@@ -264,9 +274,11 @@ class MainWindow(QMainWindow):
 
         self.act_open = action("Open…", "Ctrl+O", self.open_dialog)
         self.act_save = action("Save fixed file…", "Ctrl+S", self.save_dialog)
-        self.act_apply = action("Apply step", ["Ctrl+Return", "Ctrl+Enter"], self.apply_step)
-        self.act_skip = action("Skip step", None, self.skip_step)
-        self.act_back = action("Back", "Alt+Left", self.back_step)
+        # Step moves from the keyboard, menus and buttons go through
+        # _from_user, which drops input queued during slow work.
+        self.act_apply = action("Apply step", ["Ctrl+Return", "Ctrl+Enter"], self._from_user(self.apply_step))
+        self.act_skip = action("Skip step", None, self._from_user(self.skip_step))
+        self.act_back = action("Back", "Alt+Left", self._from_user(self.back_step))
         self.act_restart = action("Start over", None, self.restart)
         self.act_database = action("Material database…", "Ctrl+M", self.open_material_database)
         self.act_fit = action("Fit bed map", None, lambda: self.map.fit())
@@ -283,6 +295,7 @@ class MainWindow(QMainWindow):
             action("Toggle change", "Space", self.checklist.toggle_selected),
             action("Accept all", "A", lambda: self.checklist.set_all(True)),
             action("Reject all", "R", lambda: self.checklist.set_all(False)),
+            action("Filter changes", "Ctrl+F", self.checklist.focus_filter),
         ]
 
         file_menu = self.menuBar().addMenu("&File")
@@ -356,9 +369,9 @@ class MainWindow(QMainWindow):
         self.theme_buttons.idClicked.connect(lambda i: self.set_theme(theme.THEME_NAMES[i]))
 
     def _wire(self) -> None:
-        self.apply_button.clicked.connect(self.apply_step)
-        self.skip_button.clicked.connect(self.skip_step)
-        self.back_button.clicked.connect(self.back_step)
+        self.apply_button.clicked.connect(self.act_apply.trigger)
+        self.skip_button.clicked.connect(self.act_skip.trigger)
+        self.back_button.clicked.connect(self.act_back.trigger)
         self.steps.selectionEdited.connect(self.selection_edited)
         self.steps.stepRequested.connect(self.go_to_step)
         self.checklist.selectionMoved.connect(self._list_selection_moved)
@@ -372,6 +385,7 @@ class MainWindow(QMainWindow):
         self.code.lineActivated.connect(self._code_line_activated)
         self.final.nameEdited.connect(self._name_edited)
         self.final.saveRequested.connect(self.save_dialog)
+        self.final.anotherFileRequested.connect(self.open_another)
 
     def _load_fix_list(self) -> None:
         offered = available_fixes()
@@ -402,7 +416,8 @@ class MainWindow(QMainWindow):
         self.code.refresh_theme()
         self.map.refresh_theme()
         self.view3d.refresh_theme()
-        self.diff.viewport().update()
+        self.diff.refresh_theme()
+        self.final.refresh_theme()
         self.steps.show_status(*self._step_statuses())
         self._choices_changed()
 
@@ -478,14 +493,23 @@ class MainWindow(QMainWindow):
             self.recent_menu.addAction(Path(path).name, lambda p=path: self.open_file(p)).setToolTip(path)
         self.recent_menu.setEnabled(bool(self.recent_files()))
 
-    def open_dialog(self) -> None:
-        start = str(Path(self.recent_files()[0]).parent) if self.recent_files() else ""
+    def open_dialog(self, start: str = "") -> None:
+        """Asks for a program to open, starting in `start` (by default the
+        most recent file's folder)."""
+        if not start and self.recent_files():
+            start = str(Path(self.recent_files()[0]).parent)
         path, _ = QFileDialog.getOpenFileName(self, "Open a program", start, FILE_FILTER)
         if path:
             self.open_file(path)
 
+    def open_another(self) -> None:
+        """Fix another file: Open, starting where the last one was saved."""
+        self.open_dialog(str(Path(self.final.saved_path).parent) if self.final.saved_path else "")
+
     def open_file(self, path: str) -> bool:
-        if self.session is not None and self.session.index > 0 and not self.ask(
+        # A finished review that's been saved is done with: no need to ask.
+        saved = self._saved and self.session is not None and self.session.finished
+        if self.session is not None and self.session.index > 0 and not saved and not self.ask(
             "Open another file?", "The current review has applied steps. Open a new file and discard it?"
         ):
             return False
@@ -495,12 +519,13 @@ class MainWindow(QMainWindow):
             self.show_error("Couldn't open the file", str(exc))
             return False
         program.source_name = Path(path).name
-        self.path = path
-        self.session = ReviewSession(program, self.steps.selected())
-        self.output_name = default_output_name(program.source_name)
-        self._remember(str(Path(path).resolve()))
-        self.setWindowTitle(f"{program.source_name} — LMD Fixer")
-        self._update()
+        with self._working(f"Opening {program.source_name}…"):
+            self.path = path
+            self.session = ReviewSession(program, self.steps.selected())
+            self.output_name = default_output_name(program.source_name)
+            self._remember(str(Path(path).resolve()))
+            self.setWindowTitle(f"{program.source_name} — LMD Fixer")
+            self._update()
         return True
 
     def dragEnterEvent(self, event) -> None:
@@ -514,20 +539,50 @@ class MainWindow(QMainWindow):
 
     # -- review steps ----------------------------------------------------------
 
+    @contextmanager
+    def _working(self, message: str):
+        """A wait cursor and `message` in the status bar while slow work runs
+        (a step on a 100k-line program takes seconds), with `_busy` set so
+        step moves queued meanwhile are dropped (see `_from_user`)."""
+        self._busy = True
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.statusBar().showMessage(message)
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)  # paint them first
+        try:
+            yield
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
+            self._busy = False
+            self._quiet_until = time.monotonic() + QUIET_AFTER_WORK_S
+
+    def _from_user(self, slot):
+        """`slot`, ignored while slow work runs and just after, when key
+        presses typed during it are delivered: a second Ctrl+Enter pressed
+        while waiting mustn't apply the next step too. (Tests call the step
+        methods directly.)"""
+        def guarded(*_) -> None:
+            if not self._busy and time.monotonic() >= self._quiet_until:
+                slot()
+        return guarded
+
     def apply_step(self) -> None:
         if self.session and not self.session.finished:
-            self.session.apply()
-            self._update()
+            with self._working(f"Applying {self.session.fix_label(self.session.fix_id)}…"):
+                self.session.apply()
+                self._update()
 
     def skip_step(self) -> None:
         if self.session and not self.session.finished:
-            self.session.skip()
-            self._update()
+            with self._working("Skipping…"):
+                self.session.skip()
+                self._update()
 
     def back_step(self) -> None:
         if self.session and self.session.index > 0:
-            self.session.back()
-            self._update()
+            with self._working("Going back…"):
+                self.session.back()
+                self._update()
 
     def go_to_step(self, step: int) -> None:
         if not self.session or step >= self.session.index:
@@ -537,13 +592,15 @@ class MainWindow(QMainWindow):
             f"Go back to “{self.session.fix_label(self.session.fix_ids[step])}”? "
             "The steps after it are undone; your choices in them are kept.",
         ):
-            self.session.back_to(step)
-            self._update()
+            with self._working("Going back…"):
+                self.session.back_to(step)
+                self._update()
 
     def restart(self) -> None:
         if self.session:
-            self.session.restart(keep_choices=True)
-            self._update()
+            with self._working("Starting over…"):
+                self.session.restart(keep_choices=True)
+                self._update()
 
     def selection_edited(self, selected: tuple[str, ...]) -> None:
         self.settings.setValue("selected_fixes", list(selected))
@@ -553,8 +610,9 @@ class MainWindow(QMainWindow):
             self.steps.set_selected(self.session.fix_ids)
             self.settings.setValue("selected_fixes", list(self.session.fix_ids))
             return
-        self.session.set_selection(selected)
-        self._update()
+        with self._working("Starting the review over…"):
+            self.session.set_selection(selected)
+            self._update()
 
     # -- questions (methods, so tests can answer them) ---------------------------
 
@@ -586,6 +644,7 @@ class MainWindow(QMainWindow):
     def _update(self) -> None:
         """Brings every part of the window in line with the session."""
         self.undo.clear()  # undo covers edits within the current step
+        self._saved = False  # any step move or new file means unsaved work
         session = self.session
         if session is None:
             self.central.setCurrentWidget(self.welcome)
@@ -625,7 +684,7 @@ class MainWindow(QMainWindow):
                 self.recipes.load(session, self._part_of_toolpaths())
             else:
                 self.panels.setCurrentWidget(self.checklist)
-                self.checklist.load(session, self._part_of_changes(session))
+                self.checklist.load(session, self._part_of_changes(session), self._toolpath_of_changes(session))
         self._enable(has_file=True)
 
     def _enable(self, has_file: bool) -> None:
@@ -659,6 +718,16 @@ class MainWindow(QMainWindow):
             start = self.map.toolpath_at_line(change.original_index)
             if start is not None:
                 out[change.original_index] = parts[start]
+        return out
+
+    def _toolpath_of_changes(self, session: ReviewSession) -> dict[int, str]:
+        """The toolpath each change is in (some fixes, like rotary removal,
+        don't name it on the change itself)."""
+        out = {}
+        for change in session.proposal().changes:
+            start = self.map.toolpath_at_line(change.original_index)
+            if start is not None:
+                out[change.original_index] = self.map.info[start].name
         return out
 
     def _mode(self) -> str | None:
@@ -818,4 +887,6 @@ class MainWindow(QMainWindow):
         self.output_name = Path(path).name
         self.final.name.setText(self.output_name)
         self.final.show_notes(plan.notes)
+        self.final.show_saved(path)
+        self._saved = True
         self.statusBar().showMessage(f"Saved {path}", 8000)
