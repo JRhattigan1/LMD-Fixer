@@ -1,4 +1,4 @@
-"""Themes: Dark (default), Light and Vivid, in a macOS-inspired style.
+"""Themes: Dark (default), Light, Vivid and Glass, in a macOS-inspired style.
 
 Each theme is a set of colour tokens. `use(name)` copies the chosen theme's
 tokens into this module's globals, so code that reads `theme.TEXT` etc. at
@@ -11,20 +11,36 @@ validate_palette.py against that theme's CANVAS: blue/red for kept/removed
 and blue/orange for unchanged/new P pass every check on all three canvases
 (CVD ΔE 24–27). Green/red was dropped: on white it failed contrast, and a
 darker green fell into the colour-blind warning band.
+
+Glass follows Apple's Liquid Glass (WWDC25 "Meet Liquid Glass" and the HIG
+Materials guidance), as far as Qt allows: glass only on the navigation
+layer (the floating sidebar, toolbar controls, the step buttons and
+segmented controls), never on content, which stays on solid cards; a
+bright specular rim along the top of each glass shape and a faint outer
+edge; capsule controls and concentric corners; tint kept for the primary
+action alone; no glass on glass (what sits on glass uses plain fills).
+Qt can't blur or lens what's behind a widget, so the glass is a
+translucent white over a soft BACKDROP gradient. It sets BACKDROP and
+GLASS / GLASS_EDGE, which switch on the glass rules (`_glass_rules`, in a
+dark or light variant per the theme's `dark`); opaque themes leave them
+empty. Glass is dark and reuses Dark's map colours, re-validated against its
+CANVAS (= its CARD, so the map has no square edge inside the rounded card):
+CVD ΔE 25.7 (kept/removed) and 27.4 (P), all checks pass.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
 
+import math
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPalette, QPen, QPixmap
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
-THEME_NAMES = ["Dark", "Light", "Vivid"]
+THEME_NAMES = ["Dark", "Light", "Vivid", "Glass"]
 DEFAULT_THEME = "Dark"
 
 
@@ -68,6 +84,10 @@ class Theme:
     RECIPE_CHANGED: str
     # Change marks (alpha 0-255)
     MARK_ALPHA: int
+    # Glass themes only (see module docstring); "" means an ordinary, opaque theme.
+    BACKDROP: str = ""  # QSS brush behind the whole window, e.g. a qlineargradient
+    GLASS: str = ""  # QSS fill of the glass shapes, mid-sheen (sidebar, cards, controls)
+    GLASS_EDGE: str = ""  # their faint outer edge (the top edge is a bright rim)
 
 
 THEMES = {
@@ -107,6 +127,26 @@ THEMES = {
         REMOVAL_KEPT="#3987e5", REMOVAL_GONE="#d03b3b", RECIPE_UNCHANGED="#3987e5", RECIPE_CHANGED="#d95a1d",
         MARK_ALPHA=80,
     ),
+    # Apple's Liquid Glass, dark: a deep, cool backdrop; glass on the controls
+    # and the floating sidebar; content on solid dark cards; tint only on
+    # Apply/Save. Text checked over the glass at its lightest (TEXT 9.2:1).
+    "Glass": Theme(
+        "Glass", True,
+        WINDOW="#121620", SIDEBAR="#1c1f2a", CARD="#1c1c1e", FIELD="#2c2c2f", RAISED="#3a3a3d",
+        CANVAS="#1c1c1e", SEPARATOR="#38383b",  # CANVAS = CARD: the map blends into its rounded card
+        TEXT="#f2f2f7", DIM="#aeaeb2", FAINT="#6e6e73",
+        ACCENT="#0a84ff", ACCENT_TEXT="#ffffff", ACCENT_2="#0a84ff", SUCCESS="#30d158", WARNING="#e3b341",
+        FOCUS="#f5f5f7",
+        SYN_G="#6cb6ff", SYN_M="#d2a8ff", SYN_F="#ffb86b", SYN_P="#7ee787", SYN_O="#64d2ff",
+        SYN_COMMENT="#7c7c82", SYN_MARKER="#64d2ff",
+        NEUTRAL="#6c7480", TRAVEL="#8e8e93",
+        REMOVAL_KEPT="#3987e5", REMOVAL_GONE="#d03b3b", RECIPE_UNCHANGED="#3987e5", RECIPE_CHANGED="#d95a1d",
+        MARK_ALPHA=70,
+        BACKDROP=("qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0c1220, stop:0.55 #1a1c2c, "
+                  "stop:1 #0e1e28)"),
+        GLASS="rgba(255, 255, 255, 13)",  # the middle of the sheen
+        GLASS_EDGE="rgba(255, 255, 255, 26)",
+    ),
 }
 
 # Current theme's tokens, as module globals (see module docstring). Set by use().
@@ -116,6 +156,7 @@ TEXT = DIM = FAINT = ACCENT = ACCENT_TEXT = ACCENT_2 = SUCCESS = WARNING = FOCUS
 SYN_G = SYN_M = SYN_F = SYN_P = SYN_O = SYN_COMMENT = SYN_MARKER = ""
 NEUTRAL = TRAVEL = REMOVAL_KEPT = REMOVAL_GONE = RECIPE_UNCHANGED = RECIPE_CHANGED = ""
 MARK_ALPHA = 70
+BACKDROP = GLASS = GLASS_EDGE = ""
 # Older names still used around the app.
 SURFACE = PANEL = ""
 # Proposed-change marks and diff rows, derived per theme in use().
@@ -183,7 +224,29 @@ def apply_theme(app: QApplication, name: str = DEFAULT_THEME) -> Theme:
         p.setColor(QPalette.Disabled, role, QColor(t.FAINT))
     app.setPalette(p)
     app.setStyleSheet(stylesheet(t, _check_image()))
+    _round_popups(app)
     return t
+
+
+class _PopupRounder(QObject):
+    """Menus and tooltips are separate windows, square however round their
+    stylesheet border: the window's corners showed behind the curve. Made
+    frameless and translucent as they're first polished, only what the
+    stylesheet draws shows, rounded corners included."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Polish and obj.isWidgetType() and obj.isWindow():
+            if isinstance(obj, QMenu) or obj.metaObject().className() == "QTipLabel":
+                if not obj.testAttribute(Qt.WA_TranslucentBackground):
+                    obj.setWindowFlags(obj.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+                    obj.setAttribute(Qt.WA_TranslucentBackground)
+        return False
+
+
+def _round_popups(app: QApplication) -> None:
+    if getattr(app, "_popup_rounder", None) is None:
+        app._popup_rounder = _PopupRounder(app)
+        app.installEventFilter(app._popup_rounder)
 
 
 def _check_image() -> str:
@@ -209,6 +272,26 @@ def _check_image() -> str:
     return path.as_posix()
 
 
+def card_radius(t: Theme | None = None) -> int:
+    """Corner radius of the cards: rounder on glass themes, as macOS 26's
+    windows are."""
+    return 18 if (t or current).BACKDROP else 12
+
+
+def card_inset(t: Theme | None = None) -> int:
+    """How far a card's edge-to-edge content (the map, the code) must sit
+    inside it to clear the rounded corners: square content any closer pokes
+    out past the corner's curve, which r * (1 - 1/sqrt 2) just clears; plus
+    the 1 px border."""
+    return math.ceil(card_radius(t) * (1 - 1 / math.sqrt(2))) + 1
+
+
+def floating_sidebar(t: Theme | None = None) -> bool:
+    """Whether the sidebar floats as an inset slab (glass themes) rather
+    than running the window's full height."""
+    return bool((t or current).BACKDROP)
+
+
 def _rgba(colour: str, alpha: float) -> str:
     c = QColor(colour)
     return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
@@ -219,6 +302,7 @@ def stylesheet(t: Theme, check_image: str = "") -> str:
     hover = _rgba(t.TEXT, 0.06)
     primary_bg = (f"qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {t.ACCENT}, stop:1 {t.ACCENT_2})"
                   if t.ACCENT_2 != t.ACCENT else t.ACCENT)
+    radius = card_radius(t)
     return f"""
     QWidget {{ color: {t.TEXT}; }}
     QMainWindow, QDialog {{ background: {t.WINDOW}; }}
@@ -253,7 +337,7 @@ def stylesheet(t: Theme, check_image: str = "") -> str:
     QFrame#steprow[current="true"] {{ background: {_rgba(t.ACCENT, 0.18)}; }}
 
     /* Cards */
-    QFrame#card {{ background: {t.CARD}; border: 1px solid {t.SEPARATOR}; border-radius: 12px; }}
+    QFrame#card {{ background: {t.CARD}; border: 1px solid {t.SEPARATOR}; border-radius: {radius}px; }}
 
     /* Text roles */
     QLabel[role="title"] {{ font-size: 16pt; font-weight: 600; }}
@@ -322,4 +406,124 @@ def stylesheet(t: Theme, check_image: str = "") -> str:
 
     QStatusBar {{ background: {t.WINDOW}; color: {t.DIM}; }}
     QStatusBar::item {{ border: none; }}
+    """ + (_glass_rules(t) if t.BACKDROP else "")
+
+
+def _glass_rules(t: Theme) -> str:
+    """Liquid Glass, after Apple's WWDC25 guidance (see the module
+    docstring). Later rules of the same selector win, so these override the
+    opaque ones above."""
+    edge = t.GLASS_EDGE
+    if t.dark:
+        # Dark glass: white at low strength, its rim a softer highlight.
+        rim = _rgba("#ffffff", 0.32)  # the specular highlight along a glass shape's top edge
+        lit = _rgba("#ffffff", 0.14)  # glass under the pointer catches more light
+        pressed = _rgba("#ffffff", 0.04)
+        faded = _rgba("#ffffff", 0.03)  # disabled glass
+        row_hover = _rgba("#ffffff", 0.06)
+        track = _rgba("#ffffff", 0.07)  # a plain fill, for controls sitting on solid content
+        puck = "#4a4a50"  # the selected segment: solid, not tinted
+        puck_edge = _rgba("#ffffff", 0.12)
+        # Light catching the glass: brightest along the top, the glass's own
+        # fill (GLASS) across the middle, lifting at the bottom where it
+        # refracts through.
+        sheen = (0.13, 0.08)
+        field = _rgba("#ffffff", 0.06)
+        popup = _rgba("#1e1e22", 0.96)
+    else:
+        rim = _rgba("#ffffff", 0.95)
+        lit = _rgba("#ffffff", 0.88)
+        pressed = _rgba("#ffffff", 0.45)
+        faded = _rgba("#ffffff", 0.35)
+        row_hover = _rgba("#ffffff", 0.6)
+        track = _rgba("#000000", 0.05)
+        puck = "#ffffff"
+        puck_edge = _rgba("#000000", 0.10)
+        sheen = (0.75, 0.6)
+        field = _rgba("#ffffff", 0.7)
+        popup = _rgba("#fafafc", 0.96)
+    top, bottom = sheen
+    sheen = (f"qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {_rgba('#ffffff', top)}, "
+             f"stop:0.45 {t.GLASS}, stop:1 {_rgba('#ffffff', bottom)})")
+    r = card_radius(t)
+    # Capsule radii: half a control's height. Qt ignores a radius over half
+    # the height (the control then draws square), so the smaller controls
+    # (fields, tabs, toolbar buttons, about 26 px tall) get their own.
+    capsule = 15  # push buttons, the theme switch
+    pill = 12
+    return f"""
+    /* Liquid Glass: the soft backdrop shows through the bars */
+    QMainWindow, QDialog {{ background: {t.BACKDROP}; }}
+    QToolBar, QMenuBar, QStatusBar {{ background: transparent; }}
+
+    /* Toolbar controls: glass capsules that light up under the pointer */
+    QToolButton {{ border-radius: {pill}px; padding: 5px 12px; }}
+    QToolButton:hover {{ background: {sheen}; }}
+    QToolBar::separator {{ background: {edge}; }}
+
+    /* The sidebar: a floating slab of glass (MainWindow insets it from the
+       window's edges; see floating_sidebar), with step rows concentric
+       inside it (plain fills, not glass on glass) */
+    QWidget#sidebar {{ background: {sheen}; border: 1px solid {edge}; border-top-color: {rim};
+                       border-radius: {r + 4}px; }}
+    QFrame#steprow {{ border-radius: {r - 6}px; }}
+    QFrame#steprow:hover {{ background: {row_hover}; }}
+    QFrame#steprow[current="true"] {{ background: {_rgba(t.ACCENT, 0.14)}; }}
+
+    /* Cards are glass: the step panel, the welcome drop zone. The map and
+       program card (content="true") stays solid, as content should */
+    QFrame#card {{ background: {sheen}; border: 1px solid {edge}; border-top-color: {rim};
+                   border-radius: {r}px; }}
+    QFrame#card[content="true"] {{ background: {t.CARD}; border: 1px solid {edge}; border-top-color: {rim}; }}
+    QGraphicsView {{ border: none; }}
+
+    /* Lists sit straight on the glass; a selected or hovered row is a
+       rounded pill that starts after the indent (the row's first and last
+       cells round their outer corners) */
+    QTreeView, QTableView, QListWidget {{ background: transparent; }}
+    QTreeView {{ show-decoration-selected: 0; }}
+    QTreeView::branch, QTreeView::branch:selected, QTreeView::branch:hover {{ background: transparent; }}
+    QTreeView::item:first {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; }}
+    QTreeView::item:last {{ border-top-right-radius: 8px; border-bottom-right-radius: 8px; }}
+    QTreeView::item:only-one {{ border-radius: 8px; }}
+    QTableView::item:selected:first {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; }}
+    QTableView::item:selected:last {{ border-top-right-radius: 8px; border-bottom-right-radius: 8px; }}
+    QListWidget::item {{ border-radius: 8px; padding: 2px 6px; }}
+    QHeaderView::section, QTableCornerButton::section {{ background: transparent; border-bottom-color: {edge}; }}
+
+    /* Buttons: glass capsules with a specular rim; only the primary action is tinted */
+    QPushButton {{ background: {sheen}; border: 1px solid {edge}; border-top-color: {rim};
+                   border-radius: {capsule}px; padding: 6px 16px; }}
+    QPushButton:hover {{ background: {lit}; border-color: {edge}; border-top-color: {rim}; }}
+    QPushButton:pressed {{ background: {pressed}; }}
+    QPushButton:disabled {{ background: {faded}; color: {t.FAINT}; border-color: {edge}; }}
+    QPushButton[primary="true"] {{ background: {t.ACCENT}; color: {t.ACCENT_TEXT}; border: 1px solid {t.ACCENT};
+                                   border-top-color: {_rgba("#ffffff", 0.55)}; border-radius: {capsule}px; }}
+    QPushButton[primary="true"]:hover {{ background: {QColor(t.ACCENT).lighter(110).name()}; }}
+    QPushButton[primary="true"]:disabled {{ background: {faded}; color: {t.FAINT};
+                                            border-color: {edge}; }}
+    QPushButton[flat="true"] {{ background: transparent; border: none; border-radius: 12px; }}
+    QPushButton[flat="true"]:hover {{ background: {track}; }}
+
+    /* Fields and tick boxes: rounder, on a light fill */
+    QLineEdit, QSpinBox, QComboBox {{ background: {field}; border-color: {edge}; border-radius: {pill}px;
+                                      padding: 4px 12px; }}
+    QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ padding: 3px 11px; }}
+    /* Pop-ups: rounded glass panes with the rim (see _PopupRounder) */
+    QMenu {{ background: {popup}; border: 1px solid {edge}; border-top-color: {rim}; border-radius: 12px; }}
+    QMenu::item {{ border-radius: 7px; }}
+    QToolTip {{ background: {popup}; border: 1px solid {edge}; border-top-color: {rim}; border-radius: 10px; }}
+
+    /* Segmented controls: a glass capsule over the backdrop (the theme switch)
+       or a plain track on content (Plan / 3D), with a solid white puck */
+    QToolButton[segment="true"] {{ background: {sheen}; border: 1px solid {edge}; border-top-color: {rim};
+                                   color: {t.DIM}; padding: 4px 14px; }}
+    QToolButton[segment="true"]:checked {{ background: {puck}; color: {t.TEXT}; border: 1px solid {puck_edge};
+                                           border-top-color: {rim}; font-weight: 600; }}
+    QToolButton[edge="first"] {{ border-top-left-radius: {capsule}px; border-bottom-left-radius: {capsule}px; }}
+    QToolButton[edge="last"] {{ border-top-right-radius: {capsule}px; border-bottom-right-radius: {capsule}px; }}
+    QTabBar::tab {{ background: {track}; border: 1px solid transparent; color: {t.DIM}; padding: 5px 20px; }}
+    QTabBar::tab:first {{ border-top-left-radius: {pill}px; border-bottom-left-radius: {pill}px; }}
+    QTabBar::tab:last {{ border-top-right-radius: {pill}px; border-bottom-right-radius: {pill}px; }}
+    QTabBar::tab:selected {{ background: {puck}; color: {t.TEXT}; border: 1px solid {puck_edge}; font-weight: 600; }}
     """

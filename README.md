@@ -116,8 +116,10 @@ on machines that don't have them.
 
 **Help → Keyboard and mouse** lists every shortcut.
 
-**Looks:** **Dark** (the default), **Light** and a colourful **Vivid**, from
-the control at the right of the toolbar. Your choice is remembered.
+**Looks:** **Dark** (the default), **Light**, a colourful **Vivid**, and
+**Glass**, a dark look after Apple's Liquid Glass: a floating glass sidebar
+and capsule controls over a deep backdrop, with the content on solid cards. Pick one
+from the control at the right of the toolbar; your choice is remembered.
 
 **SpaceMouse:** a 3Dconnexion SpaceMouse moves whichever view is showing.
 

@@ -30,9 +30,9 @@ Using it
   change) and press Save. Then Open folder shows the saved file, and Fix
   another file opens the next one.
 
-Help > Keyboard and mouse lists every shortcut. The Dark / Light / Vivid
-buttons at the top right change the look. A 3Dconnexion SpaceMouse moves the
-plan and 3D views.
+Help > Keyboard and mouse lists every shortcut. The Dark / Light / Vivid /
+Glass buttons at the top right change the look. A 3Dconnexion SpaceMouse
+moves the plan and 3D views.
 
 Close the window to quit.
 

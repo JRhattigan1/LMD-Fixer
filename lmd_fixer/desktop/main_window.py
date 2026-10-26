@@ -183,7 +183,9 @@ class MainWindow(QMainWindow):
         self.top = QStackedWidget()
         self.top.addWidget(self.map_and_code)
         self.top.addWidget(self.diff)
-        self.top_card = card(self.top)
+        # Inset to clear the rounded corners (re-set per theme in set_theme).
+        self.top_card = card(self.top, margin=theme.card_inset())
+        self.top_card.setProperty("content", True)  # solid even on glass themes
 
         self.checklist = ChecklistPanel(self.undo, self.settings)
         self.recipes = RecipesPanel(self.undo)
@@ -237,10 +239,11 @@ class MainWindow(QMainWindow):
         self.steps.setMaximumWidth(340)
         root = QWidget()
         root_layout = QHBoxLayout(root)
-        root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self.steps)
         root_layout.addWidget(content, 1)
+        self.root_layout = root_layout
+        self._place_sidebar()
         self.setCentralWidget(root)
 
         self.status = QLabel()
@@ -350,6 +353,12 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(spacer)
         self.theme_buttons = QButtonGroup(self)
         self.theme_buttons.setExclusive(True)
+        # One container, no spacing, so the segments join into one control
+        # (the toolbar would space them apart).
+        segments = QWidget()
+        segments_layout = QHBoxLayout(segments)
+        segments_layout.setContentsMargins(0, 0, 0, 0)
+        segments_layout.setSpacing(0)
         for i, name in enumerate(theme.THEME_NAMES):
             b = QToolButton()
             b.setText(name)
@@ -361,7 +370,8 @@ class MainWindow(QMainWindow):
             elif i == len(theme.THEME_NAMES) - 1:
                 b.setProperty("edge", "last")
             self.theme_buttons.addButton(b, i)
-            toolbar.addWidget(b)
+            segments_layout.addWidget(b)
+        toolbar.addWidget(segments)
         current = self.settings.value("theme", theme.DEFAULT_THEME)
         if current not in theme.THEME_NAMES:
             current = theme.DEFAULT_THEME
@@ -412,6 +422,9 @@ class MainWindow(QMainWindow):
         button = self.theme_buttons.button(theme.THEME_NAMES.index(theme.current.name))
         if not button.isChecked():
             button.setChecked(True)
+        inset = theme.card_inset()
+        self.top_card.layout().setContentsMargins(inset, inset, inset, inset)
+        self._place_sidebar()
         # Widgets that paint with cached theme colours.
         self.code.refresh_theme()
         self.map.refresh_theme()
@@ -420,6 +433,12 @@ class MainWindow(QMainWindow):
         self.final.refresh_theme()
         self.steps.show_status(*self._step_statuses())
         self._choices_changed()
+
+    def _place_sidebar(self) -> None:
+        """Insets the sidebar from the window's edges when the theme floats
+        it (a glass slab), so its border and contents move together."""
+        margins = (10, 2, 0, 10) if theme.floating_sidebar() else (0, 0, 0, 0)
+        self.root_layout.setContentsMargins(*margins)
 
     def _readable_summaries(self) -> list[str]:
         """Each step's summary, led by the fix's name rather than its id."""

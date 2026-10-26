@@ -229,8 +229,38 @@ project (closed-loop layer-height correction). It isn't part of this app.
     self-test uses it after a real `grabFramebuffer()`.
   - To look at it, render with the real `windows` platform and
     `grabFramebuffer()`. The offscreen platform gets a context but no image.
-- **Themes** (`theme.py`): Dark (default), Light and Vivid, from the
+- **Themes** (`theme.py`): Dark (default), Light, Vivid and Glass, from the
   segmented control in the toolbar, remembered in `QSettings` ("theme").
+  The control's buttons share one zero-spacing container so they join.
+  - Glass follows Apple's Liquid Glass guidance (WWDC25 "Meet Liquid
+    Glass"), translated to what Qt can draw.
+    - Glass goes only on the navigation layer: the floating sidebar, the
+      toolbar and step buttons, and the theme switch. Content (cards,
+      lists, code, maps) stays solid.
+    - Each glass shape gets a bright specular rim along its top edge and a
+      faint outer edge.
+    - Controls are capsules, and corners are concentric (sidebar r+4,
+      cards r, step rows r−6).
+    - Only the primary action is tinted.
+    - Segmented controls use a white puck rather than an accent fill.
+    - No glass on glass: what sits on glass uses plain fills.
+    - Qt can't blur or lens what's behind a widget, so the glass is
+      translucent white over a deep `BACKDROP` gradient. It has a sheen:
+      brightest along the top, `GLASS` across the middle, lifting again
+      at the bottom.
+    - The step panel and welcome cards are glass, with lists straight on
+      them. The map/program card is `content="true"` and stays solid. Its
+      `CANVAS` equals its `CARD`, so the map has no square edge inside.
+    - Selected rows are rounded pills (`::item:first` / `:last`, with
+      `show-decoration-selected: 0` so the indent isn't a square block).
+    - Glass is a dark theme. `_glass_rules` has a dark and a light variant,
+      chosen by the theme's `dark`: rim strength, hover, the puck and so on.
+  - A theme is a glass theme when it sets `BACKDROP` / `GLASS` /
+    `GLASS_EDGE`. `stylesheet()` appends `_glass_rules` for it; the opaque
+    themes' stylesheets are untouched. `card_radius` / `card_inset` give
+    its rounder cards. `floating_sidebar` makes `MainWindow._place_sidebar`
+    inset the sidebar through the root layout, not a QSS margin (that
+    moves the border but not the contents).
   - A theme is a set of colour tokens. `use()` copies them into module
     globals, so draw-time reads like `theme.TEXT` follow the current theme.
   - `apply_theme` rebuilds the palette and the one app stylesheet.
@@ -244,6 +274,7 @@ project (closed-loop layer-height correction). It isn't part of this app.
   dashed, tinted and ✕-labelled, and a new P is thicker with a bold label.
   Kept/removed is blue/red, not green/red: on white the green failed
   contrast, and a darker green fell into the colour-blind warning band.
+  Glass is dark, on Dark's `CANVAS`, so it reuses Dark's validated colours.
   Re-validate before adding or changing one.
 - **SpaceMouse** (`spacemouse.py`) reads 3Dconnexion HID reports through
   `hidapi`, which works alongside 3DxWare.
@@ -273,6 +304,13 @@ project (closed-loop layer-height correction). It isn't part of this app.
     temp folder (`theme._check_image`).
   - Don't `blockSignals` on a model behind a proxy while loading (the
     dialog's table stayed empty); use a `_loading` flag.
+  - Qt ignores a `border-radius` over half a widget's height, and the
+    widget then draws square. Fields, tabs and toolbar buttons (~26 px)
+    use `pill` (12), not the push buttons' `capsule` (15).
+  - Menus and tooltips are separate, square windows behind their rounded
+    QSS borders. `theme._PopupRounder` (installed by `apply_theme`, in
+    every theme) makes them frameless and translucent when first polished,
+    so the corners really are round.
   - Font weight can't be data-driven in a label layer.
   - The first OpenGL widget in a window that's already shown makes Qt
     hide it, recreate its native window and show it again: the window
@@ -422,7 +460,7 @@ Run `python -m pytest` (install with `pip install -e .[dev]`).
   tests, and theme tests late in the run took 30 s instead of 2.
 - **To look at the window,** render it offscreen with `widget.grab()` and set
   `QT_QPA_FONTDIR=C:\Windows\Fonts`; otherwise every glyph is drawn as a box.
-  Check all three themes after a visual change.
+  Check every theme after a visual change.
 - **Full-pipeline check against the references**
   (`tests/test_reference_files.py`): a `ReviewSession` over `FIX_ORDER`,
   applying every step with its defaults. That accepts every change except
