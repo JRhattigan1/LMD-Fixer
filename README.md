@@ -27,8 +27,9 @@ out.
 
 The build ends with a self-test. The built `.exe` must build its window in
 every theme and load the 3D and SpaceMouse modules. Where the example
-`.ptp` files are present, it must also produce the same output as the
-source code, byte for byte. You can run the same check on any machine
+`.ptp` files are present, it must also open one and draw it in the 3D view
+(so a build with broken OpenGL support fails), and produce the same output
+as the source code, byte for byte. You can run the same check on any machine
 with `"LMD Fixer.exe" --selftest IN.ptp OUT.ptp --report report.txt`. The
 `.exe` has no console, so it writes its results to the report file.
 

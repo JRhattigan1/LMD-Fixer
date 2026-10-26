@@ -65,7 +65,8 @@ project (closed-loop layer-height correction). It isn't part of this app.
 
   Choices survive Back and `restart()`. `set_selection()` starts over and
   forgets them, and `selection_change_discards_work()` says whether to ask
-  first. The window and `--selftest` both drive it.
+  first. The window and `--selftest` both drive it. `fix` is cached per
+  step, because the UI asks for it on every change on every redraw.
 - `lmd_fixer/export.py` — what the machine gets and what changed:
   - `plan_output`: output name, extension checks and O-number sync, with
     notes to show
@@ -80,6 +81,11 @@ project (closed-loop layer-height correction). It isn't part of this app.
   - `path_points` gives the polylines to draw.
   - `program_moves` returns every move, rapids included, with Z, for the 3D
     view.
+  - `analyse_toolpaths` is cached on the program's lines (`lru_cache`, last
+    4), since the plan map and 3D view both ask for it. **Treat its result
+    as read-only**: mutating it would corrupt the cache. `_words` (a line's
+    parsed G-code words) is cached per line text too, as each step changes
+    only a few lines.
 - `lmd_fixer/recipes.py` — the material/recipe database. It has one CSV row
   per `M98 Pxxxx` recipe number: the panel settings (laser power, powder
   flow g/min, nozzle gas) plus Material/Notes.
@@ -130,6 +136,13 @@ project (closed-loop layer-height correction). It isn't part of this app.
   full-width band per line is only added for changes under
   `BAND_MAX_LINES`: Qt draws full width only for an empty cursor, and a
   section removal would need thousands.
+  - The cursors per change are built once per step (`_change_cursors`);
+    ticking or moving the selection only recolours them.
+  - The highlighter does one regex pass per line (`TOKENS`, a named group
+    per colour, comments first). Six separate passes were most of a step
+    change's cost on a 10,000-line program.
+  - `set_lines` blocks the view's own signals while loading, and undo is
+    off (the view is read-only, and undo history was a third of each load).
 - **Selection is shared.** The plan map, the 3D view, the step list and
   the code cursor all show the same selection:
   - The window mirrors each into the others (`_list_selection_moved`,
@@ -155,8 +168,35 @@ project (closed-loop layer-height correction). It isn't part of this app.
     without GL.
   - A click is a press and release under `CLICK_SLOP_PX`; anything longer
     is an orbit.
-  - The GL widget is only created on first show, so tests never touch
-    OpenGL.
+  - The GL widget is only created on first show (on a zero timer, so the
+    "Loading the 3D view…" placeholder paints first), so tests never touch
+    OpenGL. `main()` calls `preload()`, which imports `pyqtgraph.opengl` on
+    a background thread: that import takes 1–3 s and used to freeze the
+    window the first time 3D was opened. It only imports; no Qt objects.
+  - **A handful of GL items, whatever the toolpath count.** A
+    `GLLinePlotItem` has one width, so deposition is one item per width in
+    use (`_lines`, by `group_by_width`: the style's width, plus
+    `SELECTED_EXTRA_WIDTH` when selected), with per-vertex colours. Each
+    toolpath is drawn once, at its own width. Don't collapse that into a
+    base + "emphasis" pair: the sections step styles every section 2.0, so
+    selected sections stopped standing out. Travel, the selection box and
+    the grid are one item each. All labels are drawn by one `LabelLayer`
+    in a single QPainter pass (pyqtgraph's `GLTextItem` opened a painter
+    per label per frame). Restyling and selecting refill arrays only.
+    `_flatten` builds the combined vertex array and each toolpath's range
+    in it; picking uses the same array.
+  - **Nothing is drawn while hidden.** Loads, styles and selections mark
+    `_dirty` and `_sync()` applies them when the tab is next shown.
+  - **A new GL context is handled — don't remove it.** pyqtgraph caches
+    compiled shaders per process, not per context, so when Qt recreated
+    the context (e.g. the window moving to another screen) every draw
+    failed with "invalid value", every frame, and logging those froze the
+    app. `_GLView.initializeGL` calls `reset_pyqtgraph_gl_cache()`, and on
+    every context *after the first* recreates the items. The first
+    `initializeGL` comes after `_create_gl` has already made them, so
+    rebuilding there doubled the 3D tab's first open (`_gl_initialised`).
+  - `drawn_toolpaths()` says how many toolpaths are on screen; the
+    self-test uses it after a real `grabFramebuffer()`.
   - To look at it, render with the real `windows` platform and
     `grabFramebuffer()`. The offscreen platform gets a context but no image.
 - **Themes** (`theme.py`): Dark (default), Light and Vivid, from the
@@ -204,6 +244,16 @@ project (closed-loop layer-height correction). It isn't part of this app.
   - Don't `blockSignals` on a model behind a proxy while loading (the
     dialog's table stayed empty); use a `_loading` flag.
   - Font weight can't be data-driven in a label layer.
+  - The first OpenGL widget in a window that's already shown makes Qt
+    hide it, recreate its native window and show it again: the window
+    closed and reopened the first time 3D was opened. `main()` (and
+    `--selftest`) call `view3d.prepare_window` *before* `show()`, which
+    adds an empty hidden `QOpenGLWidget` so the window is OpenGL from the
+    start. Not in the constructor, so tests stay GL-free.
+  - On finishing the review the window clears the code view's changes
+    (`show_changes([])`). The view is hidden, but a theme change still
+    repaints it, and its stale changes asked the finished session, which
+    has no current fix, whether they were accepted.
 
 ## Conventions specific to this codebase
 
